@@ -41,7 +41,6 @@ from .layout import (
 from .ocr import (
     DEFAULT_DPI,
     DEFAULT_LANG,
-    DEFAULT_MIN_CONF,
     ocr_page_words,
     ocr_region_words,
     word_conf,
@@ -57,6 +56,35 @@ BLOCK_LINE_GAP = 24.0     # once a block starts, its lines are densely stacked
 MAX_SAME_LINE_VALUES = 10
 MAX_BLOCK_VALUES = 20
 LOW_CONF_LABEL = "UNCLEAR"  # placeholder for a word OCR was not confident about
+
+# Coverage levels. Each step only *adds* sources and strictness -- the text layer
+# is always read first, so a level never makes detection worse for real text.
+LEVELS = {
+    # text layer + pages that have none; images ignored
+    "fast": dict(ocr_images=False, min_conf=60.0,
+                 image_min_pt=(40.0, 12.0), image_min_src_px=5000,
+                 image_min_area_frac=0.005),
+    # + pictures big enough to hold a document (the default)
+    "default": dict(ocr_images=True, min_conf=60.0,
+                    image_min_pt=(40.0, 12.0), image_min_src_px=5000,
+                    image_min_area_frac=0.005),
+    # + every picture down to an icon, and redact uncertain OCR words too
+    "full": dict(ocr_images=True, min_conf=80.0,
+                 image_min_pt=(8.0, 4.0), image_min_src_px=64,
+                 image_min_area_frac=0.0),
+}
+
+
+def resolve_level(level: str, **overrides) -> dict:
+    """Expand a level name into engine settings; explicit overrides win."""
+    if level not in LEVELS:
+        raise ValueError(f"level must be one of: {', '.join(LEVELS)}")
+    cfg = dict(LEVELS[level])
+    cfg["level"] = level
+    for key, value in overrides.items():
+        if value is not None:
+            cfg[key] = value
+    return cfg
 
 _VOCAB_RE = re.compile(r"[A-Za-z0-9][\w'\u2019@.\-]*")
 
@@ -93,6 +121,7 @@ class RedactionResult:
     counts: Counter                       # aggregate, by category
     redacted_hashes: dict[str, str]       # digest -> category
     unredacted_vocab: set[str]            # generic words that survive
+    level: str = "default"                # coverage level that produced it
 
     @property
     def total(self) -> int:
@@ -131,18 +160,28 @@ class Redactor:
 
     def __init__(self, out_dir: str | Path, names_file: str | Path | None = None,
                  gap: float = 16.0, ocr: str = "auto", dpi: int = DEFAULT_DPI,
-                 lang: str = DEFAULT_LANG, min_conf: float = DEFAULT_MIN_CONF,
-                 ocr_images: bool = True):
+                 lang: str = DEFAULT_LANG, min_conf: float | None = None,
+                 ocr_images: bool | None = None, level: str = "default",
+                 image_min_pt=None, image_min_src_px=None,
+                 image_min_area_frac=None):
         if ocr not in {"auto", "force", "off"}:
             raise ValueError("ocr must be one of: auto, force, off")
+        cfg = resolve_level(level, ocr_images=ocr_images, min_conf=min_conf,
+                            image_min_pt=image_min_pt,
+                            image_min_src_px=image_min_src_px,
+                            image_min_area_frac=image_min_area_frac)
         self.out_dir = Path(out_dir)
         self.names_file = names_file
         self.gap = gap
         self.ocr = ocr
         self.dpi = dpi
         self.lang = lang
-        self.min_conf = min_conf
-        self.ocr_images = ocr_images
+        self.level = cfg["level"]
+        self.min_conf = cfg["min_conf"]
+        self.ocr_images = cfg["ocr_images"]
+        self.image_min_pt = cfg["image_min_pt"]
+        self.image_min_src_px = cfg["image_min_src_px"]
+        self.image_min_area_frac = cfg["image_min_area_frac"]
 
     # -- planning ---------------------------------------------------------
     def _take(self, marks, hashes, counts, page_no, word_tuples, label):
@@ -343,7 +382,11 @@ class Redactor:
                     plan = _PagePlan(cells=page_cells(page, self.gap), ocr_mode=False)
                     if self.ocr_images:
                         # text page: look for pictures that can hide text of their own
-                        for idx, (rect, xref) in enumerate(image_regions(page)):
+                        regions = image_regions(page,
+                                                min_pt=self.image_min_pt,
+                                                min_src_px=self.image_min_src_px,
+                                                min_area_frac=self.image_min_area_frac)
+                        for idx, (rect, xref) in enumerate(regions):
                             key = (xref, round(rect.width, 1), round(rect.height, 1))
                             cached = image_cache.get(key) if xref else None
                             if cached:
@@ -439,7 +482,8 @@ class Redactor:
                 ))
 
             return RedactionResult(documents=documents, counts=counts,
-                                   redacted_hashes=hashes, unredacted_vocab=vocab)
+                                   redacted_hashes=hashes, unredacted_vocab=vocab,
+                                   level=self.level)
         finally:
             for doc in docs:
                 doc.close()

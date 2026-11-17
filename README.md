@@ -66,6 +66,7 @@ pdf-redact report.pdf --dry-run            # counts only, writes nothing
 pdf-redact report.pdf --names people.txt   # force these names to be redacted
 pdf-redact report.pdf --report manifest.json
 pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
+pdf-redact report.pdf --level full         # also OCR icon-sized pictures
 pdf-redact scan.pdf --verify-deep          # re-OCR the copy's pixels, not just its text
 pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 ```
@@ -102,6 +103,29 @@ So for a scanned page `pdf-redact`:
 the finished copy again and looks for the redacted values in the pixels. Slow (one
 more OCR pass), worth it for anything that matters.
 
+## Levels: how much gets looked at
+
+One flag sets the coverage policy. Each step only *adds* sources — the text layer is
+always read first — so a higher level never detects less of your text.
+
+| `--level` | Reads | Skips | Real pair of credit reports |
+|---|---|---|---|
+| `fast` | text layer + pages with no text | all images | 2.5 s, 0 image regions |
+| `default` | + pictures ≥ 40×12 pt and ≥ 0.5% of the page | logos, icons, rules, spacer tiles | 3.5 s, 12 regions (1 OCR) |
+| `full` | + every picture ≥ 8×4 pt / 64 px, confident-only OCR words | nothing but dust | 4.3 s, 15 regions |
+
+`full` also raises the OCR confidence floor from 60 to 80, so shaky words become
+`[UNCLEAR]` instead of being read optimistically. Anything set explicitly still wins:
+
+```bash
+pdf-redact tax.pdf --level full --min-conf 55     # full coverage, my threshold
+pdf-redact tax.pdf --level fast --ocr-images      # fast, but still look at pictures
+```
+
+If you don't know which to pick: `default`. Reach for `full` when the document may hide
+IDs in icons or cropped screenshots, and `fast` when you are batching thousands of
+clean digital statements.
+
 ## Pictures inside text PDFs
 
 A statement can carry a text layer *and* a pasted screenshot of another statement. OCR
@@ -120,12 +144,13 @@ is therefore **on by default** for embedded images too:
   glyph deletion.
 
 ```bash
-pdf-redact statement.pdf                 # text + images (default)
-pdf-redact statement.pdf --no-ocr-images # text layer only, faster
+pdf-redact statement.pdf                  # text + images (default level)
+pdf-redact statement.pdf --no-ocr-images  # text layer only, faster
+pdf-redact statement.pdf --level full     # icon-sized pictures too
 ```
 
-Cost on two real credit reports (25 + 12 pages): ~4.4 s, of which ~2 s is the one logo
-that the xref cache did not have to redo.
+Cost on two real credit reports (25 + 12 pages): 3.5 s at the default level, of which
+~1 s is the one logo the xref cache did not have to redo.
 
 ## What gets redacted
 
@@ -181,10 +206,10 @@ print(report.clean)                                    # True
 * **Scanned PDFs depend on OCR accuracy.** A value tesseract misreads badly enough can
   slip past the detectors; that is why the confidence floor, the confusable-glyph
   patterns and `--verify-deep` exist. For high-stakes scans, review the copy.
-* **Very small images are deliberately skipped.** Below the thresholds above (logos,
-  icons, spacer tiles) the tool does not look. A picture of a face with an ID number
-  printed at 30×10 pt would be missed; raise the thresholds in `layout.image_regions()`
-  if your documents are like that.
+* **Small images are skipped unless you ask.** At `default` the tool ignores pictures
+  below 40×12 pt or 0.5% of the page; `--level full` drops that floor to 8×4 pt / 64 px.
+  Below *that* nothing is examined — a face with an ID number printed at 3 pt would be
+  missed no matter the level.
 * **Names are heuristic.** A person's name that appears exactly once, in an unlabelled
   position, can survive. Use `--names` when it matters; the copies are cheap to redo.
 * **Name repetition is measured across the whole run.** Redacting a batch of related
