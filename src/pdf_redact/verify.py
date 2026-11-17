@@ -37,6 +37,14 @@ class VerificationReport:
     def clean(self) -> bool:
         return self.leak_total == 0 and not any(self.pattern_hits.values())
 
+    def merge(self, other: VerificationReport) -> VerificationReport:
+        """Fold another pass (e.g. a deep pixel re-scan) into this report."""
+        self.pattern_hits.update(other.pattern_hits)
+        self.leak_total += other.leak_total
+        self.leaks_by_category.update(other.leaks_by_category)
+        self.masked_samples.extend(other.masked_samples[:25])
+        return self
+
     def as_dict(self) -> dict:
         return {
             "residual_pattern_hits": {k: v for k, v in self.pattern_hits.items() if v},
@@ -79,19 +87,32 @@ def scan_copy(path, redacted_hashes: dict[str, str],
 
 
 def ocr_rescan(path, redacted_hashes: dict[str, str], unredacted_vocab: set[str],
-               dpi: int = 200, lang: str = "eng", sample_limit: int = 25):
+               dpi: int = 200, lang: str = "eng", sample_limit: int = 25,
+               rects_by_page: dict | None = None):
     """Deep check: OCR the copy's *pixels* and look for redacted values again.
 
     On a scan the text layer is ours (we wrote it), so scanning it proves only that
     we are consistent. This re-reads the picture, which is the thing a leak would
-    hide in. Expensive: one OCR pass per page, so it is opt-in.
+    hide in.
+
+    `rects_by_page` limits the work to the pages (and boxes) that were OCR'd:
+    ``{page_no: [Rect, ...]}`` re-OCRs just those boxes, ``{page_no: None}`` the
+    whole page. When omitted every page is OCR'd in full.
     """
     from .ocr import ocr_page_words
 
     report = VerificationReport()
     with pymupdf.open(path) as doc:
-        for page in doc:
-            words = ocr_page_words(page, dpi=dpi, lang=lang)
+        pages = (sorted(rects_by_page) if rects_by_page is not None
+                 else range(doc.page_count))
+        for pno in pages:
+            if pno >= doc.page_count:
+                continue
+            page = doc[pno]
+            clips = rects_by_page[pno] if rects_by_page is not None else None
+            words = []
+            for clip in (clips or [None]):
+                words.extend(ocr_page_words(page, dpi=dpi, lang=lang, clip=clip))
             for cell in cells_from_words(words):
                 text = cell["text"]
                 for label, rx in PATTERNS:

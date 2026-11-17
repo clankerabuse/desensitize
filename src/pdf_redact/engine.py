@@ -46,6 +46,7 @@ from .ocr import (
     word_conf,
 )
 from .patterns import EMAIL_RE, h, norm, sensitive_tokens
+from .verify import ocr_rescan, scan_copy
 
 PLACEHOLDER_COLOR = (0.62, 0.05, 0.05)
 HEADER_MARGIN_X = 85.0     # a label this far left is a section header
@@ -72,6 +73,10 @@ LEVELS = {
     "full": dict(ocr_images=True, min_conf=80.0,
                  image_min_pt=(8.0, 4.0), image_min_src_px=64,
                  image_min_area_frac=0.0),
+    # full coverage + prove it: re-OCR the pixels of every copy before exiting
+    "paranoid": dict(ocr_images=True, min_conf=80.0,
+                     image_min_pt=(8.0, 4.0), image_min_src_px=64,
+                     image_min_area_frac=0.0, verify_deep=True),
 }
 
 
@@ -80,6 +85,7 @@ def resolve_level(level: str, **overrides) -> dict:
     if level not in LEVELS:
         raise ValueError(f"level must be one of: {', '.join(LEVELS)}")
     cfg = dict(LEVELS[level])
+    cfg.setdefault("verify_deep", False)
     cfg["level"] = level
     for key, value in overrides.items():
         if value is not None:
@@ -122,6 +128,11 @@ class RedactionResult:
     redacted_hashes: dict[str, str]       # digest -> category
     unredacted_vocab: set[str]            # generic words that survive
     level: str = "default"                # coverage level that produced it
+    verifications: dict = field(default_factory=dict)  # name -> VerificationReport
+
+    @property
+    def clean(self) -> bool:
+        return all(r.clean for r in self.verifications.values())
 
     @property
     def total(self) -> int:
@@ -163,13 +174,14 @@ class Redactor:
                  lang: str = DEFAULT_LANG, min_conf: float | None = None,
                  ocr_images: bool | None = None, level: str = "default",
                  image_min_pt=None, image_min_src_px=None,
-                 image_min_area_frac=None):
+                 image_min_area_frac=None, verify_deep: bool | None = None):
         if ocr not in {"auto", "force", "off"}:
             raise ValueError("ocr must be one of: auto, force, off")
         cfg = resolve_level(level, ocr_images=ocr_images, min_conf=min_conf,
                             image_min_pt=image_min_pt,
                             image_min_src_px=image_min_src_px,
-                            image_min_area_frac=image_min_area_frac)
+                            image_min_area_frac=image_min_area_frac,
+                            verify_deep=verify_deep)
         self.out_dir = Path(out_dir)
         self.names_file = names_file
         self.gap = gap
@@ -182,6 +194,7 @@ class Redactor:
         self.image_min_pt = cfg["image_min_pt"]
         self.image_min_src_px = cfg["image_min_src_px"]
         self.image_min_area_frac = cfg["image_min_area_frac"]
+        self.verify_deep = cfg["verify_deep"]
 
     # -- planning ---------------------------------------------------------
     def _take(self, marks, hashes, counts, page_no, word_tuples, label):
@@ -420,6 +433,7 @@ class Redactor:
             hashes: dict[str, str] = {}
             vocab: set[str] = set()
             documents: list[DocumentResult] = []
+            verifications: dict = {}
 
             for src, doc, doc_plans in zip(paths, docs, plans):
                 doc_counts: Counter = Counter()
@@ -467,6 +481,21 @@ class Redactor:
                     doc.save(dst, garbage=4, deflate=True, clean=True)
                     dst.chmod(0o600)
 
+                    # Verify every copy: the text layer always, and (at paranoid
+                    # level, or --verify-deep) the pixels that were OCR'd.
+                    report = scan_copy(dst, hashes, vocab)
+                    if self.verify_deep:
+                        pixel_pages = {}
+                        for pno, plan in enumerate(doc_plans):
+                            if plan.ocr_mode:
+                                pixel_pages[pno] = None            # whole page
+                            elif plan.regions:
+                                pixel_pages[pno] = [r for r, _w in plan.regions]
+                        if pixel_pages:
+                            report.merge(ocr_rescan(dst, hashes, vocab, lang=self.lang,
+                                                    rects_by_page=pixel_pages))
+                    verifications[src.name] = report
+
                 ocr_pages = sum(1 for p in doc_plans if p.ocr_mode)
                 mode = ("ocr" if ocr_pages == doc.page_count
                         else "mixed" if ocr_pages else "text")
@@ -483,7 +512,7 @@ class Redactor:
 
             return RedactionResult(documents=documents, counts=counts,
                                    redacted_hashes=hashes, unredacted_vocab=vocab,
-                                   level=self.level)
+                                   level=self.level, verifications=verifications)
         finally:
             for doc in docs:
                 doc.close()
