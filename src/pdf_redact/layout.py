@@ -8,7 +8,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+import pymupdf
+
 DEFAULT_GAP = 16.0
+
+# An embedded image is worth OCR-ing when it is big enough to hold text that
+# matters. Logos, icons, rules and 5x5 spacer tiles are not: skipping them keeps
+# a 25-page report from paying for 26 pointless tesseract runs.
+IMAGE_MIN_PT = (40.0, 12.0)      # rendered width, height in points
+IMAGE_MIN_SRC_PX = 5000          # source pixels (width * height)
+IMAGE_MIN_AREA_FRAC = 0.005      # share of the page area
 
 
 def page_cells(page, gap_threshold: float = DEFAULT_GAP):
@@ -53,6 +62,40 @@ def words_for_span(cell_words, text: str, start: int, end: int):
 def has_text_layer(doc, min_chars: int = 50) -> bool:
     """True when the document carries extractable text (not a pure scan)."""
     return len("".join(p.get_text("text") for p in doc).strip()) >= min_chars
+
+
+def image_regions(page, min_pt=IMAGE_MIN_PT, min_src_px: int = IMAGE_MIN_SRC_PX,
+                  min_area_frac: float = IMAGE_MIN_AREA_FRAC):
+    """Embedded images big enough to carry text: [(bbox, xref)], deduplicated.
+
+    A PDF can hide text in a picture on an otherwise-textual page (a screenshot of
+    a statement, a scanned receipt pasted into a form). `page.get_image_info()`
+    tells us where those pictures are, cheaply, before any OCR runs.
+    """
+    regions, seen = [], set()
+    page_area = abs(page.rect.width * page.rect.height) or 1.0
+    try:
+        infos = page.get_image_info(xrefs=True)
+    except Exception:
+        return regions
+
+    for info in infos:
+        bbox = pymupdf.Rect(info["bbox"]) & page.rect
+        if bbox.is_empty or bbox.is_infinite:
+            continue  # fully off-page or degenerate
+        if bbox.width < min_pt[0] or bbox.height < min_pt[1]:
+            continue
+        if info.get("width", 0) * info.get("height", 0) < min_src_px:
+            continue
+        if bbox.width * bbox.height < page_area * min_area_frac:
+            continue
+        key = (round(bbox.x0, 1), round(bbox.y0, 1),
+               round(bbox.width, 1), round(bbox.height, 1), info.get("xref"))
+        if key in seen:
+            continue
+        seen.add(key)
+        regions.append((bbox, info.get("xref")))
+    return regions
 
 
 def page_needs_ocr(page, min_words: int = 5) -> bool:

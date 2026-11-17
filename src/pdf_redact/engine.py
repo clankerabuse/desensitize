@@ -33,11 +33,19 @@ from .detect import (
 from .layout import (
     cells_from_words,
     has_text_layer,
+    image_regions,
     page_cells,
     page_needs_ocr,
     words_for_span,
 )
-from .ocr import DEFAULT_DPI, DEFAULT_LANG, DEFAULT_MIN_CONF, ocr_page_words, word_conf
+from .ocr import (
+    DEFAULT_DPI,
+    DEFAULT_LANG,
+    DEFAULT_MIN_CONF,
+    ocr_page_words,
+    ocr_region_words,
+    word_conf,
+)
 from .patterns import EMAIL_RE, h, norm, sensitive_tokens
 
 PLACEHOLDER_COLOR = (0.62, 0.05, 0.05)
@@ -64,6 +72,7 @@ class DocumentResult:
     output: Path | None
     counts: Counter = field(default_factory=Counter)
     ocr_pages: int = 0
+    image_regions: int = 0      # embedded pictures that were OCR'd
     mode: str = "text"          # text | ocr | mixed
 
     def as_dict(self) -> dict:
@@ -73,6 +82,7 @@ class DocumentResult:
             "output": str(self.output) if self.output else None,
             "mode": self.mode,
             "ocr_pages": self.ocr_pages,
+            "image_regions_ocrd": self.image_regions,
             "redactions_by_type": dict(self.counts),
         }
 
@@ -106,7 +116,8 @@ class _PagePlan:
     """Everything decided for one page before anything is written."""
     cells: list
     ocr_mode: bool
-    words: list | None = None     # OCR words, for rebuilding the text layer
+    words: list | None = None     # OCR words, whole page (scans)
+    regions: list = field(default_factory=list)   # (bbox, words) for embedded images
 
 
 class Redactor:
@@ -120,7 +131,8 @@ class Redactor:
 
     def __init__(self, out_dir: str | Path, names_file: str | Path | None = None,
                  gap: float = 16.0, ocr: str = "auto", dpi: int = DEFAULT_DPI,
-                 lang: str = DEFAULT_LANG, min_conf: float = DEFAULT_MIN_CONF):
+                 lang: str = DEFAULT_LANG, min_conf: float = DEFAULT_MIN_CONF,
+                 ocr_images: bool = True):
         if ocr not in {"auto", "force", "off"}:
             raise ValueError("ocr must be one of: auto, force, off")
         self.out_dir = Path(out_dir)
@@ -130,6 +142,7 @@ class Redactor:
         self.dpi = dpi
         self.lang = lang
         self.min_conf = min_conf
+        self.ocr_images = ocr_images
 
     # -- planning ---------------------------------------------------------
     def _take(self, marks, hashes, counts, page_no, word_tuples, label):
@@ -245,14 +258,14 @@ class Redactor:
 
     # -- applying ---------------------------------------------------------
     @staticmethod
-    def _apply_page(page, page_marks, ocr_mode: bool):
+    def _apply_page(page, page_marks, smear_images: bool):
         for words, _label in page_marks:
             for w in words:
                 page.add_redact_annot(pymupdf.Rect(w[:4]), fill=(1, 1, 1), cross_out=False)
         kwargs = dict(graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                       text=pymupdf.PDF_REDACT_TEXT_REMOVE)
         # a scanned page has no glyphs to delete: burn the pixels instead
-        kwargs["images"] = (pymupdf.PDF_REDACT_IMAGE_PIXELS if ocr_mode
+        kwargs["images"] = (pymupdf.PDF_REDACT_IMAGE_PIXELS if smear_images
                             else pymupdf.PDF_REDACT_IMAGE_NONE)
         try:
             page.apply_redactions(**kwargs)
@@ -315,6 +328,7 @@ class Redactor:
             # cells are cached so learning, detection and the text-layer rebuild
             # all work from the same OCR output.
             plans: list[list[_PagePlan]] = []
+            image_cache: dict = {}   # (xref, w, h) -> (rect, words): logos repeat
             for doc in docs:
                 doc_plans = []
                 for page in doc:
@@ -324,9 +338,30 @@ class Redactor:
                         words = ocr_page_words(page, dpi=self.dpi, lang=self.lang)
                         doc_plans.append(_PagePlan(cells=cells_from_words(words, self.gap),
                                                    ocr_mode=True, words=words))
-                    else:
-                        doc_plans.append(_PagePlan(cells=page_cells(page, self.gap),
-                                                   ocr_mode=False))
+                        continue
+
+                    plan = _PagePlan(cells=page_cells(page, self.gap), ocr_mode=False)
+                    if self.ocr_images:
+                        # text page: look for pictures that can hide text of their own
+                        for idx, (rect, xref) in enumerate(image_regions(page)):
+                            key = (xref, round(rect.width, 1), round(rect.height, 1))
+                            cached = image_cache.get(key) if xref else None
+                            if cached:
+                                base, cached_words = cached
+                                dx, dy = rect.x0 - base.x0, rect.y0 - base.y0
+                                words = [(w[0] + dx, w[1] + dy, w[2] + dx, w[3] + dy,
+                                          *w[4:]) for w in cached_words]
+                            else:
+                                words = ocr_region_words(page, rect, dpi=self.dpi,
+                                                         lang=self.lang,
+                                                         block_namespace=idx + 1)
+                                if xref and words:
+                                    image_cache[key] = (rect, words)
+                            if not words:
+                                continue
+                            plan.regions.append((rect, words))
+                            plan.cells.extend(cells_from_words(words, self.gap))
+                    doc_plans.append(plan)
                 plans.append(doc_plans)
 
             # Pass 2: name learning across every page of every input.
@@ -364,16 +399,23 @@ class Redactor:
                 for pno, page in enumerate(doc):
                     page_marks = by_page.get(pno, [])
                     plan = doc_plans[pno]
+                    # words that came from pixels (whole page or an image region)
+                    pixel_words = list(plan.words or [])
+                    for _rect, words in plan.regions:
+                        pixel_words.extend(words)
                     if not page_marks:
-                        # nothing to redact, but a scan still needs a text layer
-                        if plan.ocr_mode:
-                            self._rebuild_text_layer(page, plan.words, set())
+                        # nothing to redact, but OCR'd pixels still need a text layer
+                        if pixel_words:
+                            self._rebuild_text_layer(page, pixel_words, set())
                         continue
-                    self._apply_page(page, page_marks, ocr_mode=plan.ocr_mode)
+                    # smearing is required whenever the redacted words live in an
+                    # image: deleting a text layer leaves the picture untouched
+                    self._apply_page(page, page_marks,
+                                     smear_images=plan.ocr_mode or bool(plan.regions))
                     self._draw_placeholders(page, page_marks)
-                    if plan.ocr_mode:
+                    if pixel_words:
                         redacted_ids = {id(w) for words, _l in page_marks for w in words}
-                        self._rebuild_text_layer(page, plan.words, redacted_ids)
+                        self._rebuild_text_layer(page, pixel_words, redacted_ids)
 
                 self._scrub_metadata(doc)
 
@@ -392,6 +434,7 @@ class Redactor:
                     output=None if dry_run else dst,
                     counts=doc_counts,
                     ocr_pages=ocr_pages,
+                    image_regions=sum(len(p.regions) for p in doc_plans),
                     mode=mode,
                 ))
 

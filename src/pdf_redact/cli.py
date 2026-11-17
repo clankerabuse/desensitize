@@ -49,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-conf", type=float, default=DEFAULT_MIN_CONF,
                     help="OCR words below this confidence are redacted as [UNCLEAR] "
                          f"(default {DEFAULT_MIN_CONF})")
+    ap.add_argument("--ocr-images", dest="ocr_images", action="store_true", default=True,
+                    help="OCR embedded images on otherwise-textual pages (default: on)")
+    ap.add_argument("--no-ocr-images", dest="ocr_images", action="store_false",
+                    help="skip embedded images (text layer only)")
     ap.add_argument("--verify-deep", action="store_true",
                     help="also re-OCR the copies and look for leaks in the pixels "
                          "(slow, recommended for scans)")
@@ -63,7 +67,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
     redactor = Redactor(out_dir=args.out, names_file=args.names, ocr=args.ocr,
-                        dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf)
+                        dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf,
+                        ocr_images=args.ocr_images)
     try:
         result = redactor.redact(args.inputs, dry_run=args.dry_run,
                                  debug_marks=args.debug_marks)
@@ -102,7 +107,11 @@ def main(argv=None) -> int:
     if not args.quiet:
         print("== redaction summary (counts only, no values) ==")
         for doc in result.documents:
-            tag = f", {doc.ocr_pages} OCR" if doc.ocr_pages else ""
+            tag = ""
+            if doc.ocr_pages:
+                tag += f", {doc.ocr_pages} OCR page(s)"
+            if doc.image_regions:
+                tag += f", {doc.image_regions} image region(s)"
             print(f"  {doc.source.name}  ->  {doc.output.name}   "
                   f"({doc.pages} pages, {doc.mode}{tag})")
             for cat, n in sorted(doc.counts.items()):

@@ -15,7 +15,7 @@ from .engine import DocumentResult, NoTextLayerError, RedactionResult, Redactor
 from .ocr import OcrUnavailableError, ocr_page_words
 from .verify import VerificationReport, ocr_rescan, scan_copy
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "redact",
@@ -33,11 +33,12 @@ __all__ = [
 
 
 def redact(paths, out_dir=None, names_file=None, ocr="auto", dpi=300,
-           min_conf=60.0) -> RedactionResult:
+           min_conf=60.0, ocr_images=True) -> RedactionResult:
     """Redact `paths` into `out_dir` (default: ~/Downloads/agent-friendly).
 
-    `ocr="auto"` OCRs any page without a text layer; `"off"` refuses scans.
+    `ocr="auto"` OCRs any page without a text layer, and by default also OCRs
+    embedded images that could hide text of their own; `"off"` refuses scans.
     """
     out = out_dir or (Path.home() / "Downloads" / "agent-friendly")
     return Redactor(out_dir=out, names_file=names_file, ocr=ocr, dpi=dpi,
-                    min_conf=min_conf).redact(paths)
+                    min_conf=min_conf, ocr_images=ocr_images).redact(paths)

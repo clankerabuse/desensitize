@@ -115,6 +115,41 @@ def mixed_pdf(tmp_path, report_pdf):
 
 
 @pytest.fixture
+def image_pdf(tmp_path):
+    """Text page with an embedded picture holding PII, plus a tiny 5x5 logo.
+
+    This is the "screenshot pasted into a statement" case: the page has a normal
+    text layer, so the value only exists in pixels.
+    """
+    # build the picture: fake PII rendered into a bitmap
+    shot = pymupdf.open()
+    sp = shot.new_page(width=300, height=120)
+    sp.insert_text((12, 30), f"Account {FAKE['account']}", fontsize=11)
+    sp.insert_text((12, 50), f"SSN {FAKE['ssn']}", fontsize=11)
+    sp.insert_text((12, 70), FAKE["city_line"], fontsize=11)
+    png = sp.get_pixmap(dpi=200).tobytes("png")
+    shot.close()
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((60, 60), "Statement of account (screenshot below)", fontsize=11)
+    rect = pymupdf.Rect(60, 90, 360, 210)
+    page.insert_image(rect, stream=png)
+
+    logo = pymupdf.open()
+    lp = logo.new_page(width=10, height=10)
+    lp.draw_rect(lp.rect, color=None, fill=(0.2, 0.4, 0.9))
+    tiny = lp.get_pixmap(dpi=36).tobytes("png")
+    logo.close()
+    page.insert_image(pymupdf.Rect(500, 60, 510, 70), stream=tiny)
+
+    path = tmp_path / "with_screenshot.pdf"
+    doc.save(path)
+    doc.close()
+    return path, rect
+
+
+@pytest.fixture
 def blank_pdf(tmp_path):
     """A page with no text layer at all (stands in for a scan)."""
     doc = pymupdf.open()
