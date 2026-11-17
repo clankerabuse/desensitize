@@ -67,7 +67,7 @@ pdf-redact report.pdf --names people.txt   # force these names to be redacted
 pdf-redact report.pdf --report manifest.json
 pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
 pdf-redact report.pdf --level full         # also OCR icon-sized pictures
-pdf-redact scan.pdf --verify-deep          # re-OCR the copy's pixels, not just its text
+pdf-redact scan.pdf --level paranoid       # full coverage + prove the pixels are clean
 pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 ```
 
@@ -75,7 +75,7 @@ pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 |---|---|
 | `0` | copies written, self-check clean |
 | `1` | bad usage / missing input |
-| `2` | **review needed** — the self-check still sees something in the copies |
+| `2` | **review needed** — the self-check (or the paranoid pixel re-scan) still sees something |
 | `3` | scan and `--ocr off` — refused rather than faked |
 | `4` | OCR requested but tesseract (or the language pack) is missing |
 
@@ -99,23 +99,32 @@ So for a scanned page `pdf-redact`:
    copy still extracts as text and the ordinary self-check verifies a layer we built
    rather than hoping OCR round-trips.
 
-`--verify-deep` adds the only check that can catch a rendering-level mistake: it OCRs
-the finished copy again and looks for the redacted values in the pixels. Slow (one
-more OCR pass), worth it for anything that matters.
+`--verify-deep` (implied by `--level paranoid`) adds the only check that can catch a
+rendering-level mistake: it OCRs the finished copy again and looks for the redacted
+values in the pixels, limited to the pages and boxes that were actually OCR'd.
 
 ## Levels: how much gets looked at
 
 One flag sets the coverage policy. Each step only *adds* sources — the text layer is
 always read first — so a higher level never detects less of your text.
 
-| `--level` | Reads | Skips | Real pair of credit reports |
+| `--level` | Reads | Then proves it | Real pair of credit reports |
 |---|---|---|---|
-| `fast` | text layer + pages with no text | all images | 2.5 s, 0 image regions |
-| `default` | + pictures ≥ 40×12 pt and ≥ 0.5% of the page | logos, icons, rules, spacer tiles | 3.5 s, 12 regions (1 OCR) |
-| `full` | + every picture ≥ 8×4 pt / 64 px, confident-only OCR words | nothing but dust | 4.3 s, 15 regions |
+| `fast` | text layer + pages with no text | text layer | 2.5 s, 0 image regions |
+| `default` | + pictures ≥ 40×12 pt and ≥ 0.5% of the page | text layer | 3.5 s, 12 regions (1 OCR) |
+| `full` | + every picture ≥ 8×4 pt / 64 px, confident-only OCR words | text layer | 4.3 s, 15 regions |
+| `paranoid` | same as `full` | + re-OCRs the pixels that were touched | 6.0 s |
 
-`full` also raises the OCR confidence floor from 60 to 80, so shaky words become
-`[UNCLEAR]` instead of being read optimistically. Anything set explicitly still wins:
+`full` and `paranoid` raise the OCR confidence floor from 60 to 80, so shaky words
+become `[UNCLEAR]` instead of being read optimistically.
+
+`paranoid` is the one that closes the loop on scans: the copy's text layer is written
+by us, so scanning it proves consistency, not safety — this level re-OCRs every page
+or image box that was touched and fails the run (exit 2) if anything redacted is still
+readable in the picture. It only OCRs what was OCR'd the first time, so a text-only
+document pays nothing and a report with 15 logo regions pays ~1 s.
+
+Anything set explicitly still wins:
 
 ```bash
 pdf-redact tax.pdf --level full --min-conf 55     # full coverage, my threshold
@@ -123,8 +132,9 @@ pdf-redact tax.pdf --level fast --ocr-images      # fast, but still look at pict
 ```
 
 If you don't know which to pick: `default`. Reach for `full` when the document may hide
-IDs in icons or cropped screenshots, and `fast` when you are batching thousands of
-clean digital statements.
+IDs in icons or cropped screenshots, `paranoid` when the input is a scan you cannot
+eyeball afterwards, and `fast` when you are batching thousands of clean digital
+statements.
 
 ## Pictures inside text PDFs
 

@@ -19,7 +19,6 @@ from pathlib import Path
 from . import __version__
 from .engine import NoTextLayerError, Redactor
 from .ocr import DEFAULT_DPI, DEFAULT_LANG, OcrUnavailableError
-from .verify import ocr_rescan, scan_copy
 
 DEFAULT_OUT = Path.home() / "Downloads" / "agent-friendly"
 
@@ -39,10 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="report what would be redacted, write nothing")
     ap.add_argument("--report", metavar="FILE",
                     help="write a JSON manifest of counts here")
-    ap.add_argument("--level", choices=["fast", "default", "full"], default="default",
+    ap.add_argument("--level", choices=["fast", "default", "full", "paranoid"],
+                    default="default",
                     help="how much to look at: fast = text layer + scans, default = + "
-                         "document-sized images (default), full = + every image, stricter "
-                         "OCR confidence")
+                         "document-sized images (default), full = + every image with a "
+                         "stricter OCR confidence, paranoid = full + re-OCR the copies "
+                         "to prove the pixels are clean")
     ap.add_argument("--ocr", choices=["auto", "force", "off"], default="auto",
                     help="OCR pages without a text layer: auto (default), force every "
                          "page, or off (refuse scans)")
@@ -57,9 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="OCR embedded images on otherwise-textual pages (default: on)")
     ap.add_argument("--no-ocr-images", dest="ocr_images", action="store_false",
                     help="skip embedded images (text layer only)")
-    ap.add_argument("--verify-deep", action="store_true",
-                    help="also re-OCR the copies and look for leaks in the pixels "
-                         "(slow, recommended for scans)")
+    ap.add_argument("--verify-deep", dest="verify_deep", action="store_true", default=None,
+                    help="re-OCR the copies and look for leaks in the pixels "
+                         "(implied by --level paranoid)")
     ap.add_argument("--debug-marks", action="store_true",
                     help="print each redaction mark (page, label, position)")
     ap.add_argument("-q", "--quiet", action="store_true", help="counts only, no banner")
@@ -72,7 +73,8 @@ def main(argv=None) -> int:
 
     redactor = Redactor(out_dir=args.out, names_file=args.names, ocr=args.ocr,
                         dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf,
-                        ocr_images=args.ocr_images, level=args.level)
+                        ocr_images=args.ocr_images, level=args.level,
+                        verify_deep=args.verify_deep)
     try:
         result = redactor.redact(args.inputs, dry_run=args.dry_run,
                                  debug_marks=args.debug_marks)
@@ -95,18 +97,9 @@ def main(argv=None) -> int:
         print(f"  would redact {result.total} spans; nothing written (--dry-run)")
         return 0
 
-    verifications = {}
-    for doc in result.documents:
-        report = scan_copy(doc.output, result.redacted_hashes, result.unredacted_vocab)
-        if args.verify_deep and doc.ocr_pages:
-            # the text layer is ours on a scan; check the pixels too
-            deep = ocr_rescan(doc.output, result.redacted_hashes,
-                              result.unredacted_vocab, lang=args.ocr_lang)
-            report.pattern_hits.update(deep.pattern_hits)
-            report.leak_total += deep.leak_total
-            report.leaks_by_category.update(deep.leaks_by_category)
-            report.masked_samples.extend(deep.masked_samples[:25])
-        verifications[doc.source.name] = report
+    # the engine verifies every copy it writes (text layer always, pixels at
+    # --verify-deep / --level paranoid), so there is nothing to re-do here
+    verifications = result.verifications
 
     if not args.quiet:
         print(f"== redaction summary (level: {result.level}; counts only, no values) ==")
@@ -122,7 +115,7 @@ def main(argv=None) -> int:
                 print(f"      {cat:<9} {n}")
         print("== self-check on the copies ==")
 
-    clean = True
+    clean = result.clean
     for name, rep in verifications.items():
         if not args.quiet:
             hits = {k: v for k, v in rep.pattern_hits.items() if v}
@@ -131,7 +124,6 @@ def main(argv=None) -> int:
             print(f"    residual re-detected known values: {rep.leak_total}")
             for cat, ln, masked in rep.masked_samples:
                 print(f"      {cat:<9} {ln:>3}  {masked}")
-        clean = clean and rep.clean
 
     if not args.quiet:
         print("  RESULT:", "CLEAN" if clean else "REVIEW NEEDED (see above)")
@@ -140,6 +132,8 @@ def main(argv=None) -> int:
         manifest = {
             "tool": f"pdf-redact {__version__}",
             "level": result.level,
+            "verify_deep": bool(result.verifications and
+                                getattr(redactor, "verify_deep", False)),
             "inputs": [str(d.source) for d in result.documents],
             "outputs": [d.as_dict() for d in result.documents],
             "redactions_total": result.total,
