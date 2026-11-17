@@ -63,6 +63,31 @@ PATTERNS = [
     ("NUMBER", MASK_TAIL_RE),
 ]
 
+# --------------------------------------------------------------------------
+# OCR-only detectors. Tesseract confuses glyphs that look alike (0/O, 1/I/l,
+# 5/S, 8/B, 2/Z, 6/G), so an SSN read as "512-84-993I" matches nothing in the
+# strict patterns above. These variants accept the confusable classes and then
+# demand enough real digits to avoid matching words.
+# --------------------------------------------------------------------------
+_CONFUSABLE = r"0-9OoIlSsBbZzGg"
+SSN_OCR_RE = re.compile(
+    rf"(?<![\w-])[{_CONFUSABLE}]{{3}}[-. ][{_CONFUSABLE}]{{2}}[-. ][{_CONFUSABLE}]{{4}}(?![\w-])"
+)
+PHONE_OCR_RE = re.compile(
+    rf"(?<![\w])(?:1[-.\s])?\(?[{_CONFUSABLE}]{{3}}\)?[-.\s]"
+    rf"[{_CONFUSABLE}]{{3}}[-.\s][{_CONFUSABLE}]{{4}}(?!\w)"
+)
+OCR_PATTERNS = [
+    ("SSN", SSN_OCR_RE, 5),      # (label, regex, minimum real digits in the match)
+    ("PHONE", PHONE_OCR_RE, 8),
+]
+DIGIT_RE = re.compile(r"\d")
+
+
+def digit_count(text: str) -> int:
+    return len(DIGIT_RE.findall(text))
+
+
 DOB_CTX_RE = re.compile(
     r"\b(dob|date\s+of\s+birth|born|birth\s*(?:date|year)|year\s+of\s+birth|yob)\b",
     re.I,

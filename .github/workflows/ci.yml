@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      # the OCR tests run the real binary; skipping them would hide regressions
+      - name: Install tesseract
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
       - run: uv venv --python ${{ matrix.python-version }}
       - run: uv pip install -e ".[dev]"
       - run: .venv/bin/ruff check .

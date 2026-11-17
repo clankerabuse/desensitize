@@ -18,7 +18,8 @@ from pathlib import Path
 
 from . import __version__
 from .engine import NoTextLayerError, Redactor
-from .verify import scan_copy
+from .ocr import DEFAULT_DPI, DEFAULT_LANG, DEFAULT_MIN_CONF, OcrUnavailableError
+from .verify import ocr_rescan, scan_copy
 
 DEFAULT_OUT = Path.home() / "Downloads" / "agent-friendly"
 
@@ -38,6 +39,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="report what would be redacted, write nothing")
     ap.add_argument("--report", metavar="FILE",
                     help="write a JSON manifest of counts here")
+    ap.add_argument("--ocr", choices=["auto", "force", "off"], default="auto",
+                    help="OCR pages without a text layer: auto (default), force every "
+                         "page, or off (refuse scans)")
+    ap.add_argument("--dpi", type=int, default=DEFAULT_DPI,
+                    help=f"render resolution for OCR (default {DEFAULT_DPI})")
+    ap.add_argument("--ocr-lang", default=DEFAULT_LANG,
+                    help=f"tesseract language (default {DEFAULT_LANG})")
+    ap.add_argument("--min-conf", type=float, default=DEFAULT_MIN_CONF,
+                    help="OCR words below this confidence are redacted as [UNCLEAR] "
+                         f"(default {DEFAULT_MIN_CONF})")
+    ap.add_argument("--verify-deep", action="store_true",
+                    help="also re-OCR the copies and look for leaks in the pixels "
+                         "(slow, recommended for scans)")
     ap.add_argument("--debug-marks", action="store_true",
                     help="print each redaction mark (page, label, position)")
     ap.add_argument("-q", "--quiet", action="store_true", help="counts only, no banner")
@@ -48,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
-    redactor = Redactor(out_dir=args.out, names_file=args.names)
+    redactor = Redactor(out_dir=args.out, names_file=args.names, ocr=args.ocr,
+                        dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf)
     try:
         result = redactor.redact(args.inputs, dry_run=args.dry_run,
                                  debug_marks=args.debug_marks)
@@ -56,9 +71,12 @@ def main(argv=None) -> int:
         print(f"!! missing input: {exc}", file=sys.stderr)
         return 1
     except NoTextLayerError as exc:
-        print(f"!! {exc}: no usable text layer (scanned PDF?) -- needs OCR, "
-              f"refusing rather than pretending it is redacted.", file=sys.stderr)
+        print(f"!! {exc}: scanned PDF and --ocr off, refusing rather than "
+              f"pretending it is redacted.", file=sys.stderr)
         return 3
+    except OcrUnavailableError as exc:
+        print(f"!! OCR unavailable: {exc}", file=sys.stderr)
+        return 4
 
     if args.dry_run:
         for doc in result.documents:
@@ -70,13 +88,23 @@ def main(argv=None) -> int:
 
     verifications = {}
     for doc in result.documents:
-        verifications[doc.source.name] = scan_copy(
-            doc.output, result.redacted_hashes, result.unredacted_vocab)
+        report = scan_copy(doc.output, result.redacted_hashes, result.unredacted_vocab)
+        if args.verify_deep and doc.ocr_pages:
+            # the text layer is ours on a scan; check the pixels too
+            deep = ocr_rescan(doc.output, result.redacted_hashes,
+                              result.unredacted_vocab, lang=args.ocr_lang)
+            report.pattern_hits.update(deep.pattern_hits)
+            report.leak_total += deep.leak_total
+            report.leaks_by_category.update(deep.leaks_by_category)
+            report.masked_samples.extend(deep.masked_samples[:25])
+        verifications[doc.source.name] = report
 
     if not args.quiet:
         print("== redaction summary (counts only, no values) ==")
         for doc in result.documents:
-            print(f"  {doc.source.name}  ->  {doc.output.name}   ({doc.pages} pages)")
+            tag = f", {doc.ocr_pages} OCR" if doc.ocr_pages else ""
+            print(f"  {doc.source.name}  ->  {doc.output.name}   "
+                  f"({doc.pages} pages, {doc.mode}{tag})")
             for cat, n in sorted(doc.counts.items()):
                 print(f"      {cat:<9} {n}")
         print("== self-check on the copies ==")
@@ -99,15 +127,7 @@ def main(argv=None) -> int:
         manifest = {
             "tool": f"pdf-redact {__version__}",
             "inputs": [str(d.source) for d in result.documents],
-            "outputs": [
-                {
-                    "file": d.source.name,
-                    "pages": d.pages,
-                    "output": str(d.output),
-                    "redactions_by_type": dict(d.counts),
-                }
-                for d in result.documents
-            ],
+            "outputs": [d.as_dict() for d in result.documents],
             "redactions_total": result.total,
             "redactions_by_type": dict(result.counts),
             "verification": {k: v.as_dict() for k, v in verifications.items()},

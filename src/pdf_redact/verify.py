@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
-from .layout import page_cells
+from .layout import cells_from_words, page_cells
 from .patterns import PATTERNS, PLACEHOLDER_RE, h, norm
 
 _WORD_RE = re.compile(r"\S+")
@@ -51,7 +51,7 @@ def _mask(tok: str) -> str:
 
 def scan_copy(path, redacted_hashes: dict[str, str],
               unredacted_vocab: set[str], sample_limit: int = 25) -> VerificationReport:
-    """Look for leaks in one redacted copy."""
+    """Look for leaks in one redacted copy's text layer."""
     report = VerificationReport()
     with pymupdf.open(path) as doc:
         for page in doc:
@@ -71,6 +71,39 @@ def scan_copy(path, redacted_hashes: dict[str, str],
                     if not cat:
                         continue
                     seen.add(tok)
+                    report.leak_total += 1
+                    report.leaks_by_category[cat] += 1
+                    if len(report.masked_samples) < sample_limit:
+                        report.masked_samples.append((cat, len(tok), _mask(tok)))
+    return report
+
+
+def ocr_rescan(path, redacted_hashes: dict[str, str], unredacted_vocab: set[str],
+               dpi: int = 200, lang: str = "eng", sample_limit: int = 25):
+    """Deep check: OCR the copy's *pixels* and look for redacted values again.
+
+    On a scan the text layer is ours (we wrote it), so scanning it proves only that
+    we are consistent. This re-reads the picture, which is the thing a leak would
+    hide in. Expensive: one OCR pass per page, so it is opt-in.
+    """
+    from .ocr import ocr_page_words
+
+    report = VerificationReport()
+    with pymupdf.open(path) as doc:
+        for page in doc:
+            words = ocr_page_words(page, dpi=dpi, lang=lang)
+            for cell in cells_from_words(words):
+                text = cell["text"]
+                for label, rx in PATTERNS:
+                    report.pattern_hits[label] += len(rx.findall(text))
+                for tok in set(_WORD_RE.findall(text)):
+                    if PLACEHOLDER_RE.fullmatch(tok):
+                        continue
+                    cat = redacted_hashes.get(h(tok))
+                    if cat and norm(tok) in unredacted_vocab:
+                        cat = None
+                    if not cat:
+                        continue
                     report.leak_total += 1
                     report.leaks_by_category[cat] += 1
                     if len(report.masked_samples) < sample_limit:

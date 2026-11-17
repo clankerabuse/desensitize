@@ -83,6 +83,38 @@ def report_pdf(tmp_path):
 
 
 @pytest.fixture
+def scan_pdf(tmp_path, report_pdf):
+    """Image-only copy of the fake report: no text layer, like a real scan."""
+    src = pymupdf.open(report_pdf)
+    out = pymupdf.open()
+    for page in src:
+        pix = page.get_pixmap(dpi=200)
+        new = out.new_page(width=page.rect.width, height=page.rect.height)
+        new.insert_image(new.rect, stream=pix.tobytes("jpeg", jpg_quality=85))
+    path = tmp_path / "scanned_creditReport.pdf"
+    out.save(path)
+    out.close()
+    src.close()
+    return path
+
+
+@pytest.fixture
+def mixed_pdf(tmp_path, report_pdf):
+    """Page 1 textual, page 2 image-only."""
+    src = pymupdf.open(report_pdf)
+    out = pymupdf.open()
+    out.insert_pdf(src, from_page=0, to_page=0)
+    pix = src[1].get_pixmap(dpi=200)
+    new = out.new_page(width=src[1].rect.width, height=src[1].rect.height)
+    new.insert_image(new.rect, stream=pix.tobytes("jpeg", jpg_quality=85))
+    path = tmp_path / "mixed.pdf"
+    out.save(path)
+    out.close()
+    src.close()
+    return path
+
+
+@pytest.fixture
 def blank_pdf(tmp_path):
     """A page with no text layer at all (stands in for a scan)."""
     doc = pymupdf.open()

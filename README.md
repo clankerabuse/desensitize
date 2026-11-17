@@ -1,8 +1,9 @@
 # pdf-redact
 
 Make **agent-friendly copies** of sensitive PDFs — credit reports, bank statements,
-tax forms, insurance letters — by deleting the personal data from the text layer and
-replacing it with typed placeholders.
+tax forms, insurance letters — by deleting the personal data and replacing it with
+typed placeholders. Text PDFs lose the glyphs; scanned PDFs lose the pixels (and get
+a clean text layer of their own).
 
 ```bash
 pdf-redact ~/Downloads/creditReport_1234.pdf
@@ -51,7 +52,10 @@ uv pip install "git+https://github.com/clankerabuse/pdf-redact"
 uv pip install -e ".[dev]"
 ```
 
-Requires Python 3.9+ and PyMuPDF (bundled wheels; no poppler/system deps).
+Requires Python 3.9+ and PyMuPDF (bundled wheels). For scanned PDFs you also need
+tesseract plus a language pack — `pacman -S tesseract tesseract-data-eng` on Arch,
+`apt install tesseract-ocr` on Debian. Without it, text PDFs still work and scans are
+refused with a clear error.
 
 ## Usage
 
@@ -62,6 +66,8 @@ pdf-redact report.pdf --dry-run            # counts only, writes nothing
 pdf-redact report.pdf --names people.txt   # force these names to be redacted
 pdf-redact report.pdf --report manifest.json
 pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
+pdf-redact scan.pdf --verify-deep          # re-OCR the copy's pixels, not just its text
+pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 ```
 
 | Exit | Meaning |
@@ -69,10 +75,32 @@ pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
 | `0` | copies written, self-check clean |
 | `1` | bad usage / missing input |
 | `2` | **review needed** — the self-check still sees something in the copies |
-| `3` | input has no text layer (a scan) — needs OCR; refused rather than faked |
+| `3` | scan and `--ocr off` — refused rather than faked |
+| `4` | OCR requested but tesseract (or the language pack) is missing |
 
 Output directory is `0700`, copies are `0600`, and PDF metadata (title/author/producer)
 is stripped as well.
+
+## Scanned PDFs (OCR)
+
+Scans are a different problem: there is no text to delete, the ink **is** the document.
+So for a scanned page `pdf-redact`:
+
+1. renders it (300 dpi by default) and runs **local** tesseract — no upload, no API,
+   the language model is a file on disk (`unshare -rn tesseract …` works);
+2. runs the same detectors over OCR words, which carry per-word confidence — any word
+   below `--min-conf` (default 60) is redacted as `[UNCLEAR]` rather than guessed at,
+   and the OCR detectors tolerate glyph confusions (`0/O`, `1/I/l`, `5/S`, `8/B`) so
+   an SSN read as `512-84-993I` still matches;
+3. burns the pixels under each redaction (`PDF_REDACT_IMAGE_PIXELS`) — measured on a
+   real page: the SSN's box went from 33% ink to 0%;
+4. writes a **new invisible text layer** containing only the surviving words, so the
+   copy still extracts as text and the ordinary self-check verifies a layer we built
+   rather than hoping OCR round-trips.
+
+`--verify-deep` adds the only check that can catch a rendering-level mistake: it OCRs
+the finished copy again and looks for the redacted values in the pixels. Slow (one
+more OCR pass), worth it for anything that matters.
 
 ## What gets redacted
 
@@ -125,8 +153,12 @@ print(report.clean)                                    # True
 
 ## Limitations (read these)
 
-* **Scanned PDFs are refused** (exit 3). There is no text layer to redact, so the only
-  honest options are OCR-then-redact or nothing. Not implemented.
+* **Scanned PDFs depend on OCR accuracy.** A value tesseract misreads badly enough can
+  slip past the detectors; that is why the confidence floor, the confusable-glyph
+  patterns and `--verify-deep` exist. For high-stakes scans, review the copy.
+* **Text inside an embedded image in an otherwise-textual PDF is not examined.** A
+  screenshot pasted into a statement page is still a picture — OCR it explicitly
+  (`--ocr force`) if you suspect one.
 * **Names are heuristic.** A person's name that appears exactly once, in an unlabelled
   position, can survive. Use `--names` when it matters; the copies are cheap to redo.
 * **Name repetition is measured across the whole run.** Redacting a batch of related

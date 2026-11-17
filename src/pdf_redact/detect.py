@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from .layout import page_cells
 from .patterns import (
     ADDRESS_FRAG_RE,
     ADDRESS_RE,
@@ -26,12 +25,14 @@ from .patterns import (
     LABEL_PREFIX_RES,
     LABEL_RES,
     NAME_STOP,
+    OCR_PATTERNS,
     ORG_LABEL_CONTEXT_RE,
     ORG_MARKERS,
     PATTERNS,
     TOKEN_RE,
     YEAR_RE,
     ZIP_RE,
+    digit_count,
 )
 
 
@@ -113,8 +114,14 @@ def name_spans(text: str, known_names: set[str], name_freq: Counter):
     return spans
 
 
-def detect_in_cell(text: str, known_names: set[str], name_freq: Counter):
-    """Return non-overlapping (start, end, label) spans to redact in this cell."""
+def detect_in_cell(text: str, known_names: set[str], name_freq: Counter,
+                   ocr_mode: bool = False):
+    """Return non-overlapping (start, end, label) spans to redact in this cell.
+
+    `ocr_mode` adds detectors that tolerate tesseract's glyph confusions
+    (0/O, 1/I/l, 5/S, 8/B). Those variants demand a minimum number of real
+    digits before they fire, so ordinary words cannot match.
+    """
     spans = []
 
     # 1. "Label: value" -- checked first so its label wins over a generic pattern
@@ -136,6 +143,12 @@ def detect_in_cell(text: str, known_names: set[str], name_freq: Counter):
         for m in rx.finditer(text):
             if m.end() > m.start():
                 spans.append((m.start(), m.end(), label))
+
+    if ocr_mode:
+        for label, rx, min_digits in OCR_PATTERNS:
+            for m in rx.finditer(text):
+                if digit_count(m.group(0)) >= min_digits:
+                    spans.append((m.start(), m.end(), label))
 
     # 3. contextual date of birth
     if DOB_CTX_RE.search(text):
@@ -178,9 +191,13 @@ def _has_street_word(text: str) -> bool:
 # --------------------------------------------------------------------------
 # Learning pass: names and their cross-document frequency.
 # --------------------------------------------------------------------------
-def learn_names_from_labels(docs) -> set[str]:
+def learn_names_from_labels(cell_lists) -> set[str]:
     """Harvest name tokens from explicitly labelled name fields, so later bare
-    mentions (headers, footers, "Wexington, Z.") are caught too."""
+    mentions (headers, footers, "Wexington, Z.") are caught too.
+
+    `cell_lists` is one list of cells per page (text or OCR), so scanned identity
+    blocks teach the vocabulary just like textual ones.
+    """
     learned: set[str] = set()
 
     def harvest(text: str) -> None:
@@ -189,66 +206,63 @@ def learn_names_from_labels(docs) -> set[str]:
             if len(w) >= 3 and w not in NAME_STOP and w not in ORG_MARKERS:
                 learned.add(w)
 
-    for doc in docs:
-        for page in doc:
-            cells = page_cells(page)
-            for cell in cells:
-                w0 = cell["words"][0]
-                if label_only(cell["text"]) == "NAME":
-                    # value cells sit on the same line to the right, or in the
-                    # block directly underneath the label
-                    for c in cells:
-                        if c is cell or not c["text"].strip():
-                            continue
-                        w = c["words"][0]
-                        same = abs(w[1] - w0[1]) <= 2 and w[0] > w0[0]
-                        below = (-1 <= w[1] - w0[3] <= 70) and (-6 <= w[0] - w0[0] <= 300)
-                        if (same or below) and not label_only(c["text"]):
-                            harvest(c["text"])
-                    continue
-                for lab, pats in LABEL_PREFIX_RES:
-                    if lab != "NAME":
+    for cells in cell_lists:
+        for cell in cells:
+            w0 = cell["words"][0]
+            if label_only(cell["text"]) == "NAME":
+                # value cells sit on the same line to the right, or in the
+                # block directly underneath the label
+                for c in cells:
+                    if c is cell or not c["text"].strip():
                         continue
-                    for _pat, rx in pats:
-                        m = rx.search(cell["text"])
-                        if m:
-                            harvest(cell["text"][m.end():])
-                            break
+                    w = c["words"][0]
+                    same = abs(w[1] - w0[1]) <= 2 and w[0] > w0[0]
+                    below = (-1 <= w[1] - w0[3] <= 70) and (-6 <= w[0] - w0[0] <= 300)
+                    if (same or below) and not label_only(c["text"]):
+                        harvest(c["text"])
+                continue
+            for lab, pats in LABEL_PREFIX_RES:
+                if lab != "NAME":
+                    continue
+                for _pat, rx in pats:
+                    m = rx.search(cell["text"])
+                    if m:
+                        harvest(cell["text"][m.end():])
+                        break
     return learned
 
 
-def build_name_freq(docs) -> Counter:
+def build_name_freq(cell_lists) -> Counter:
     """Count capitalised 2/3-token runs across all inputs (cross-document)."""
     freq: Counter = Counter()
-    for doc in docs:
-        for page in doc:
-            for cell in page_cells(page):
-                text = cell["text"]
-                toks = [(m.group(0), m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
-                i = 0
-                while i < len(toks):
-                    j = i
-                    while j + 1 < len(toks) and GAP_OK_RE.match(text[toks[j][2]:toks[j + 1][1]]):
-                        j += 1
-                    caprun = []
-                    for t in toks[i:j + 1]:
-                        if t[0][:1].isupper() or t[0].isupper():
-                            caprun.append(t)
-                        else:
-                            break
-                    if len(caprun) >= 2:
-                        lower = [t[0].lower().strip(".") for t in caprun]
-                        for k in (2, 3):
-                            for s in range(0, len(lower) - k + 1):
-                                win = lower[s:s + k]
-                                if any(w in ORG_MARKERS for w in win):
-                                    continue
-                                if all(w in NAME_STOP for w in win):
-                                    continue
-                                if not [w for w in win if w not in NAME_STOP and len(w) >= 2]:
-                                    continue
-                                freq[" ".join(win)] += 1
-                    i = max(j + 1, i + 1)
+    for cells in cell_lists:
+        for cell in cells:
+            text = cell["text"]
+            toks = [(m.group(0), m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
+            i = 0
+            while i < len(toks):
+                j = i
+                while j + 1 < len(toks) and GAP_OK_RE.match(text[toks[j][2]:toks[j + 1][1]]):
+                    j += 1
+                caprun = []
+                for t in toks[i:j + 1]:
+                    if t[0][:1].isupper() or t[0].isupper():
+                        caprun.append(t)
+                    else:
+                        break
+                if len(caprun) >= 2:
+                    lower = [t[0].lower().strip(".") for t in caprun]
+                    for k in (2, 3):
+                        for s in range(0, len(lower) - k + 1):
+                            win = lower[s:s + k]
+                            if any(w in ORG_MARKERS for w in win):
+                                continue
+                            if all(w in NAME_STOP for w in win):
+                                continue
+                            if not [w for w in win if w not in NAME_STOP and len(w) >= 2]:
+                                continue
+                            freq[" ".join(win)] += 1
+                i = max(j + 1, i + 1)
     return freq
 
 
