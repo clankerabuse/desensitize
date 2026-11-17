@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf-redact"
+version = "0.1.0"
+description = "Make agent-friendly, PII-redacted copies of PDFs (SSN, address, phone, email, DOB, account IDs, names)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "clankerabuse" }]
+keywords = ["pdf", "redaction", "pii", "privacy", "llm", "agents", "credit-report"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Utilities",
+]
+dependencies = ["pymupdf>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+pdf-redact = "pdf_redact.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/clankerabuse/pdf-redact"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdf_redact"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
