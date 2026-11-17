@@ -129,6 +129,9 @@ print(report.clean)                                    # True
   honest options are OCR-then-redact or nothing. Not implemented.
 * **Names are heuristic.** A person's name that appears exactly once, in an unlabelled
   position, can survive. Use `--names` when it matters; the copies are cheap to redo.
+* **Name repetition is measured across the whole run.** Redacting a batch of related
+  documents catches more names than redacting them one at a time (a name that appears
+  once per file is weaker evidence than twice in one run).
 * **Over-redaction is intentional** in ambiguous spots — occasionally a creditor or a
   dwelling type ("Single family") gets caught. Safety over fidelity.
 * **Not a legal redaction tool.** For discovery, court filings or FOIA releases, use a
