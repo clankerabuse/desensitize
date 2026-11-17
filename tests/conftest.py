@@ -150,6 +150,32 @@ def image_pdf(tmp_path):
 
 
 @pytest.fixture
+def small_image_pdf(tmp_path):
+    """Text page with a *small* picture (60x20 pt) holding an SSN.
+
+    Small enough that `default` skips it as an icon-sized image, big enough that
+    `full` still finds it -- this is the ladder from fast -> default -> full.
+    """
+    shot = pymupdf.open()
+    sp = shot.new_page(width=60, height=20)
+    sp.insert_text((2, 13), f"SSN {FAKE['ssn']}", fontsize=7)
+    png = sp.get_pixmap(dpi=200).tobytes("png")
+    shot.close()
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    # enough real words that the page counts as textual, not as a scan
+    page.insert_text((60, 60), "Statement of account for the billing period", fontsize=11)
+    page.insert_text((60, 76), "Balance due 1200.00 minimum payment 25.00", fontsize=11)
+    rect = pymupdf.Rect(60, 90, 120, 110)
+    page.insert_image(rect, stream=png)
+    path = tmp_path / "small_image.pdf"
+    doc.save(path)
+    doc.close()
+    return path, rect
+
+
+@pytest.fixture
 def blank_pdf(tmp_path):
     """A page with no text layer at all (stands in for a scan)."""
     doc = pymupdf.open()

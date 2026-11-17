@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .engine import NoTextLayerError, Redactor
-from .ocr import DEFAULT_DPI, DEFAULT_LANG, DEFAULT_MIN_CONF, OcrUnavailableError
+from .ocr import DEFAULT_DPI, DEFAULT_LANG, OcrUnavailableError
 from .verify import ocr_rescan, scan_copy
 
 DEFAULT_OUT = Path.home() / "Downloads" / "agent-friendly"
@@ -39,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="report what would be redacted, write nothing")
     ap.add_argument("--report", metavar="FILE",
                     help="write a JSON manifest of counts here")
+    ap.add_argument("--level", choices=["fast", "default", "full"], default="default",
+                    help="how much to look at: fast = text layer + scans, default = + "
+                         "document-sized images (default), full = + every image, stricter "
+                         "OCR confidence")
     ap.add_argument("--ocr", choices=["auto", "force", "off"], default="auto",
                     help="OCR pages without a text layer: auto (default), force every "
                          "page, or off (refuse scans)")
@@ -46,10 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"render resolution for OCR (default {DEFAULT_DPI})")
     ap.add_argument("--ocr-lang", default=DEFAULT_LANG,
                     help=f"tesseract language (default {DEFAULT_LANG})")
-    ap.add_argument("--min-conf", type=float, default=DEFAULT_MIN_CONF,
+    ap.add_argument("--min-conf", type=float, default=None,
                     help="OCR words below this confidence are redacted as [UNCLEAR] "
-                         f"(default {DEFAULT_MIN_CONF})")
-    ap.add_argument("--ocr-images", dest="ocr_images", action="store_true", default=True,
+                         "(default: 60, or 80 at --level full)")
+    ap.add_argument("--ocr-images", dest="ocr_images", action="store_true", default=None,
                     help="OCR embedded images on otherwise-textual pages (default: on)")
     ap.add_argument("--no-ocr-images", dest="ocr_images", action="store_false",
                     help="skip embedded images (text layer only)")
@@ -68,7 +72,7 @@ def main(argv=None) -> int:
 
     redactor = Redactor(out_dir=args.out, names_file=args.names, ocr=args.ocr,
                         dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf,
-                        ocr_images=args.ocr_images)
+                        ocr_images=args.ocr_images, level=args.level)
     try:
         result = redactor.redact(args.inputs, dry_run=args.dry_run,
                                  debug_marks=args.debug_marks)
@@ -105,7 +109,7 @@ def main(argv=None) -> int:
         verifications[doc.source.name] = report
 
     if not args.quiet:
-        print("== redaction summary (counts only, no values) ==")
+        print(f"== redaction summary (level: {result.level}; counts only, no values) ==")
         for doc in result.documents:
             tag = ""
             if doc.ocr_pages:
@@ -135,6 +139,7 @@ def main(argv=None) -> int:
     if args.report:
         manifest = {
             "tool": f"pdf-redact {__version__}",
+            "level": result.level,
             "inputs": [str(d.source) for d in result.documents],
             "outputs": [d.as_dict() for d in result.documents],
             "redactions_total": result.total,
