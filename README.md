@@ -2,8 +2,8 @@
 
 Make **agent-friendly copies** of sensitive PDFs — credit reports, bank statements,
 tax forms, insurance letters — by deleting the personal data and replacing it with
-typed placeholders. Text PDFs lose the glyphs; scanned PDFs lose the pixels (and get
-a clean text layer of their own).
+typed placeholders. Text PDFs lose the glyphs; scanned PDFs — and pictures embedded in
+text PDFs — lose the pixels (and get a clean text layer of their own).
 
 ```bash
 pdf-redact ~/Downloads/creditReport_1234.pdf
@@ -102,6 +102,31 @@ So for a scanned page `pdf-redact`:
 the finished copy again and looks for the redacted values in the pixels. Slow (one
 more OCR pass), worth it for anything that matters.
 
+## Pictures inside text PDFs
+
+A statement can carry a text layer *and* a pasted screenshot of another statement. OCR
+is therefore **on by default** for embedded images too:
+
+* `page.get_image_info()` lists the pictures on a page cheaply — no rendering, no OCR —
+  so the tool knows where to look before spending anything;
+* images smaller than ~40×12 pt, under 0.5% of the page area, or under 5 000 source
+  pixels are skipped as logos, icons, rules and spacer tiles (a real report had 26 of
+  those per page);
+* each surviving region is rendered and OCR'd on its own, its words are placed in
+  absolute page coordinates, and they go through the same detectors as normal text;
+* identical images are OCR'd once and shifted into place — a header logo repeated on
+  12 pages costs one tesseract call;
+* because those words live in pixels, the page is redacted with pixel smearing, not
+  glyph deletion.
+
+```bash
+pdf-redact statement.pdf                 # text + images (default)
+pdf-redact statement.pdf --no-ocr-images # text layer only, faster
+```
+
+Cost on two real credit reports (25 + 12 pages): ~4.4 s, of which ~2 s is the one logo
+that the xref cache did not have to redo.
+
 ## What gets redacted
 
 | Placeholder | Covers |
@@ -156,9 +181,10 @@ print(report.clean)                                    # True
 * **Scanned PDFs depend on OCR accuracy.** A value tesseract misreads badly enough can
   slip past the detectors; that is why the confidence floor, the confusable-glyph
   patterns and `--verify-deep` exist. For high-stakes scans, review the copy.
-* **Text inside an embedded image in an otherwise-textual PDF is not examined.** A
-  screenshot pasted into a statement page is still a picture — OCR it explicitly
-  (`--ocr force`) if you suspect one.
+* **Very small images are deliberately skipped.** Below the thresholds above (logos,
+  icons, spacer tiles) the tool does not look. A picture of a face with an ID number
+  printed at 30×10 pt would be missed; raise the thresholds in `layout.image_regions()`
+  if your documents are like that.
 * **Names are heuristic.** A person's name that appears exactly once, in an unlabelled
   position, can survive. Use `--names` when it matters; the copies are cheap to redo.
 * **Name repetition is measured across the whole run.** Redacting a batch of related

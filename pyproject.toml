@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pdf-redact"
-version = "0.2.0"
+version = "0.3.0"
 description = "Make agent-friendly, PII-redacted copies of PDFs (SSN, address, phone, email, DOB, account IDs, names)."
 readme = "README.md"
 requires-python = ">=3.9"

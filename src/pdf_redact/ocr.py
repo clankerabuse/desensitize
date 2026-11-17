@@ -56,8 +56,11 @@ def page_has_ocr_text(page, min_words: int = 5) -> bool:
         return False
 
 
-def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG):
-    """OCR one page. Returns a list of word tuples with confidence in field 8.
+def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG, clip=None):
+    """OCR one page, or just `clip` of it. Word tuples carry confidence in field 8.
+
+    Coordinates are absolute page points in both cases, so callers can lay
+    redaction rectangles down without knowing which image a word came from.
 
     Raises OcrUnavailableError when tesseract or the language pack is missing, so
     the caller can fail loudly instead of silently producing an unredacted copy.
@@ -68,10 +71,15 @@ def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG):
         raise OcrUnavailableError(
             f"tesseract language '{lang}' not installed (have: {', '.join(sorted(langs))})")
 
-    scale = 72.0 / dpi
+    scale = dpi / 72.0          # pixels per point
     with tempfile.TemporaryDirectory(prefix="pdf-redact-ocr-") as tmp:
         img = Path(tmp) / "page.png"
-        page.get_pixmap(dpi=dpi, alpha=False).save(img)
+        pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip)
+        pix.save(img)
+        # A clipped render snaps to whole pixels, so the origin is the pixel
+        # corner, not the requested coordinate. irect gives it exactly.
+        origin_x = pix.irect[0] / scale
+        origin_y = pix.irect[1] / scale
 
         env = dict(os.environ, OMP_THREAD_LIMIT="1")
         proc = subprocess.run(
@@ -101,10 +109,10 @@ def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG):
         # different paragraphs get merged into one giant line.
         block_key = int(cols[2]) * 1000 + int(cols[3])   # block_num, par_num
         words.append((
-            left * scale,
-            top * scale,
-            (left + width) * scale,
-            (top + height) * scale,
+            origin_x + left / scale,
+            origin_y + top / scale,
+            origin_x + (left + width) / scale,
+            origin_y + (top + height) / scale,
             text,
             block_key,
             int(cols[4]),   # line_num
@@ -112,6 +120,16 @@ def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG):
             conf,
         ))
     words.sort(key=lambda w: (round(w[1], 1), w[0]))
+    return words
+
+
+def ocr_region_words(page, rect, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG,
+                     block_namespace: int = 0):
+    """OCR just `rect` of a page (an embedded image) and return page-space words."""
+    words = ocr_page_words(page, dpi=dpi, lang=lang, clip=rect)
+    if block_namespace:
+        words = [(w[0], w[1], w[2], w[3], w[4], w[5] + block_namespace * 1_000_000,
+                  w[6], w[7], w[8]) for w in words]
     return words
 
 
