@@ -12,13 +12,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from .engine import DocumentResult, NoTextLayerError, RedactionResult, Redactor
-from .verify import VerificationReport, scan_copy
+from .ocr import OcrUnavailableError, ocr_page_words
+from .verify import VerificationReport, ocr_rescan, scan_copy
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "redact",
     "scan_copy",
+    "ocr_rescan",
+    "ocr_page_words",
+    "OcrUnavailableError",
     "Redactor",
     "RedactionResult",
     "DocumentResult",
@@ -28,7 +32,12 @@ __all__ = [
 ]
 
 
-def redact(paths, out_dir=None, names_file=None) -> RedactionResult:
-    """Redact `paths` into `out_dir` (default: ~/Downloads/agent-friendly)."""
+def redact(paths, out_dir=None, names_file=None, ocr="auto", dpi=300,
+           min_conf=60.0) -> RedactionResult:
+    """Redact `paths` into `out_dir` (default: ~/Downloads/agent-friendly).
+
+    `ocr="auto"` OCRs any page without a text layer; `"off"` refuses scans.
+    """
     out = out_dir or (Path.home() / "Downloads" / "agent-friendly")
-    return Redactor(out_dir=out, names_file=names_file).redact(paths)
+    return Redactor(out_dir=out, names_file=names_file, ocr=ocr, dpi=dpi,
+                    min_conf=min_conf).redact(paths)

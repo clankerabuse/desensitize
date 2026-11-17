@@ -77,9 +77,9 @@ def test_dry_run_writes_nothing(report_pdf, out_dir):
     assert not out_dir.exists()      # ...but writes no copy
 
 
-def test_scanned_pdf_is_refused(blank_pdf, out_dir):
+def test_scanned_pdf_is_refused_when_ocr_disabled(blank_pdf, out_dir):
     with pytest.raises(NoTextLayerError):
-        redact([blank_pdf], out_dir=out_dir)
+        redact([blank_pdf], out_dir=out_dir, ocr="off")
 
 
 def test_cli_exit_codes(report_pdf, blank_pdf, out_dir, tmp_path, capsys):
@@ -92,7 +92,7 @@ def test_cli_exit_codes(report_pdf, blank_pdf, out_dir, tmp_path, capsys):
                ["residual_pattern_hits"].values())
 
     assert main([str(tmp_path / "nope.pdf")]) == 1
-    assert main([str(blank_pdf)]) == 3
+    assert main([str(blank_pdf), "--ocr", "off"]) == 3   # scan refused, not faked
 
 
 def test_cli_dry_run_writes_nothing(report_pdf, out_dir):

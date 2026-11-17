@@ -13,7 +13,11 @@ DEFAULT_GAP = 16.0
 
 def page_cells(page, gap_threshold: float = DEFAULT_GAP):
     """Return [{'words': [(x0,y0,x1,y1,text,...)], 'text': 'joined'}] for a page."""
-    words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,wordno)
+    return cells_from_words(page.get_text("words"), gap_threshold)
+
+
+def cells_from_words(words, gap_threshold: float = DEFAULT_GAP):
+    """Same grouping, for words that came from OCR instead of the text layer."""
     by_line = defaultdict(list)
     for w in words:
         by_line[(w[5], w[6])].append(w)
@@ -49,3 +53,11 @@ def words_for_span(cell_words, text: str, start: int, end: int):
 def has_text_layer(doc, min_chars: int = 50) -> bool:
     """True when the document carries extractable text (not a pure scan)."""
     return len("".join(p.get_text("text") for p in doc).strip()) >= min_chars
+
+
+def page_needs_ocr(page, min_words: int = 5) -> bool:
+    """Per-page test: a page with almost no words is a scan (or an image page)."""
+    try:
+        return len(page.get_text("words")) < min_words
+    except Exception:
+        return True
