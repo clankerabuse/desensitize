@@ -1,7 +1,7 @@
 ---
 name: pdf-desensitize
 description: "Use when an agent must read a PDF that holds PII."
-version: 1.0.0
+version: 1.0.1
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -33,7 +33,7 @@ removed survived.
 ## How to Work
 
 1. `command -v desens` first. If missing, either the checkout at `~/Projects/desensitize`
-   (`.venv/bin/desens`) or `uv pip install "git+https://github.com/clankerabuse/desensitize"`.
+   (`.venv/bin/desens`) or `uv pip install "git+https://github.com/clankerabuse/desensitize@v0.9.0"`.
 2. **Do not open, extract or OCR the original yourself.** Run the tool, then work only
    from the copy it writes (default `~/Downloads/agent-friendly/`).
 3. **Print counts, never values.** The tool's summary is counts-only and safe to paste;
@@ -41,7 +41,7 @@ removed survived.
 4. Read the **exit code** before using anything. Only `0` means the copy is usable.
 
 ```bash
-command -v desens || uv pip install "git+https://github.com/clankerabuse/desensitize"
+command -v desens || uv pip install "git+https://github.com/clankerabuse/desensitize@v0.9.0"
 desens creditReport_1234.pdf    # -> ~/Downloads/agent-friendly/creditReport_redacted.pdf
                                 #    (4+ digit runs are stripped from the filename too)
 desens a.pdf b.pdf -o ~/safe         # one call for related docs = better name recall
