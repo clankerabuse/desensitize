@@ -1,10 +1,9 @@
 # desensitize
 
-`desens` — the command — makes **agent-friendly copies** of sensitive PDFs — credit
-reports, bank statements, tax forms, insurance letters — by deleting the personal data
-and replacing it with typed placeholders. Text PDFs lose the glyphs; scans — and
-pictures embedded in text PDFs — lose the pixels (and get a clean text layer of their
-own).
+`desens` makes **agent-friendly copies** of sensitive PDFs — credit reports, bank
+statements, tax forms, insurance letters — by deleting the personal data and replacing
+it with typed placeholders. Text PDFs lose the glyphs; scans — and pictures embedded in
+text PDFs — lose the pixels (and get a clean text layer of their own).
 
 ```bash
 desens ~/Downloads/creditReport_1234.pdf
