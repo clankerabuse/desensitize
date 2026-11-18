@@ -82,9 +82,23 @@ is stripped as well.
 
 ### For agents
 
-Hermes agents load the `pdf-desensitize` skill (`skill_view(name='pdf-desensitize')`)
-instead of improvising: desensitize first, read only the copy, treat a non-zero exit as
-"do not hand this over", and print counts, never values.
+The skill ships in this repo at `skills/pdf-desensitize/`: it teaches an agent to
+desensitize first, read only the copy, print counts never values, and treat a non-zero
+exit as "do not hand this over".
+
+```bash
+# Hermes: fetch the whole bundle (SKILL.md + references/)
+hermes skills install clankerabuse/desensitize/skills/pdf-desensitize
+
+# ...or make the repo a skill source and search it
+hermes skills tap add clankerabuse/desensitize
+
+# Any other SKILL.md agent (Claude Code, Cursor, Codex)
+cp -r skills/pdf-desensitize ~/.claude/skills/
+
+# Repo-local for Hermes in a checkout: put it under .hermes/skills/ and run
+hermes skills trust
+```
 
 ## Scanned PDFs (OCR)
 
