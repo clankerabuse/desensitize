@@ -11,6 +11,7 @@ the redacted copy, the strings that must *survive*, and every embedded picture
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import random
@@ -875,6 +876,761 @@ BUILDERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Tricky documents: the layouts and the objects that a redactor gets wrong
+# ---------------------------------------------------------------------------
+UNICODE_FONT = "/usr/share/fonts/TTF/DejaVuSans.ttf"
+
+
+def build_split_values(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A value wrapped across two lines, and one split across a page break."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "MERIDIAN AUTO FINANCE", size=12, font="hebo")
+    T(pg, M, 64, "Credit application - continuation sheet", size=9, font="heit")
+    t.keep_it("MERIDIAN AUTO FINANCE", "Credit application")
+
+    T(pg, M, 110, "Social Security Number:", size=9, font="hebo")
+    T(pg, M, 124, p.ssn[:7], size=9)          # "616-37-"
+    T(pg, M, 138, p.ssn[7:], size=9)          # "4632"
+    # half a value is a leak too: probe the fragments, not just the whole
+    t.add("SSN", p.ssn, 0, probes=[
+        {"kind": "text", "text": p.ssn[:7], "critical": True},
+        {"kind": "text", "text": p.ssn[7:], "critical": False}])
+
+    T(pg, M, 172, "Account Number:", size=9, font="hebo")
+    T(pg, M, 186, p.acct[:9], size=9)
+    T(pg, M, 200, p.acct[9:], size=9)
+    t.add("ACCT", p.acct, 0, probes=[
+        {"kind": "text", "text": p.acct[:9], "critical": True},
+        {"kind": "text", "text": p.acct[9:], "critical": False}])
+
+    para(pg, (M, 230, W - M, 300),
+         f"Borrower {p.name}, of {p.full_address}, signed the application on "
+         f"09/22/2023. Employment: {p.employer}. Questions: {p.phone}.", size=9)
+    for cat, val in (("NAME", p.name), ("ADDRESS", p.full_address),
+                     ("EMPLOYER", p.employer), ("PHONE", p.phone)):
+        t.add(cat, val, 0)
+    t.keep_it("09/22/2023")
+
+    T(pg, M, H - 40, "Member ID:", size=9, font="hebo")
+    T(pg, M + 70, H - 40, p.member[:4], size=9)
+    pg2 = doc.new_page(width=W, height=H)
+    T(pg2, M, 40, p.member[4:], size=9)
+    T(pg2, M, 60, "continued from previous page", size=8, font="heit")
+    t.add("MEMBER", p.member, 1, probes=[
+        {"kind": "text", "text": p.member[:4], "critical": True},
+        {"kind": "text", "text": p.member[4:], "critical": False}])
+    t.keep_it("continued from previous page")
+    t.pages = 2
+    return doc
+
+
+def build_fake_redaction(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Black boxes and strikethroughs painted over live text: the classic fake."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "NORTHWIND BANK", size=12, font="hebo")
+    T(pg, M, 64, "Statement copy (as supplied by the customer)", size=9, font="heit")
+    t.keep_it("NORTHWIND BANK", "Statement copy")
+
+    T(pg, M, 120, f"Social Security Number: {p.ssn}", size=10)
+    pg.draw_rect(pymupdf.Rect(M + 128, 112, M + 220, 124), color=None,
+                 fill=(0, 0, 0))
+    t.add("SSN", p.ssn, 0)
+
+    T(pg, M, 150, f"Telephone: {p.phone}", size=10)
+    pg.draw_line(pymupdf.Point(M + 66, 147), pymupdf.Point(M + 190, 147),
+                 color=(0, 0, 0), width=1.4)
+    t.add("PHONE", p.phone, 0)
+
+    T(pg, M, 180, f"Account Holder: {p.name}", size=10)
+    pg.draw_rect(pymupdf.Rect(M + 92, 172, M + 260, 186), color=None,
+                 fill=(1, 1, 1))
+    t.add("NAME", p.name, 0)
+
+    T(pg, M, 210, f"Account {p.acct2}   E-mail {p.email}", size=10)
+    pg.draw_rect(pymupdf.Rect(M + 50, 202, M + 175, 214), color=None, fill=(0.1, 0.1, 0.1))
+    t.add("ACCT", p.acct2, 0)
+    t.add("EMAIL", p.email, 0)
+
+    para(pg, (M, 250, W - M, 320),
+         "The copy above was redacted by the customer with a marker before being "
+         "sent on. Ink on paper is not redaction: the glyphs are still in the "
+         "file.", size=9)
+    t.pages = 1
+    return doc
+
+
+def build_white_ink(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """White-on-white text and 1.6 pt text: invisible on screen, present in the file."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "SUMMIT MORTGAGE", size=12, font="hebo")
+    T(pg, M, 64, "Loan estimate", size=9, font="heit")
+    t.keep_it("SUMMIT MORTGAGE", "Loan estimate")
+    T(pg, M, 110, "Borrower", size=9, font="hebo")
+    T(pg, M + 90, 110, p.name, size=9, color=(1, 1, 1))           # white on white
+    t.add("NAME", p.name, 0)
+    T(pg, M, 130, "SSN", size=9, font="hebo")
+    T(pg, M + 90, 130, p.ssn, size=9, color=(1, 1, 1))
+    t.add("SSN", p.ssn, 0)
+    T(pg, M, 150, "Loan", size=9, font="hebo")
+    T(pg, M + 90, 150, p.acct2, size=9, color=(0.99, 0.99, 0.99))
+    t.add("ACCT", p.acct2, 0)
+    T(pg, M, 170, "Rate 6.25%  APR 6.41%  Term 30 years", size=9)
+    t.keep_it("Rate 6.25%", "APR 6.41%", "Term 30 years")
+    # 1.6 pt speck of text at the foot of the page
+    T(pg, M, H - 20, f"{p.name} / {p.ssn} / {p.email}", size=1.6, color=(0.85, 0.85, 0.85))
+    t.add("EMAIL", p.email, 0)
+    t.pages = 1
+    return doc
+
+
+def build_unicode_names(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Accented names and addresses, embedded TrueType rather than base-14."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    pg.insert_font(fontname="dejavu", fontfile=UNICODE_FONT)
+    name = "José Müller-Ångström"
+    street = "Calle Ñandú 4480"
+    city = "San José, CA 95110"
+    T(pg, M, 50, "BANCO DEL SOL", size=12, font="hebo")
+    t.keep_it("BANCO DEL SOL", "Customer record")
+    T(pg, M, 64, "Customer record", size=9, font="heit")
+    T(pg, M, 110, f"Customer Name: {name}", size=10, font="dejavu")
+    T(pg, M, 130, f"Address: {street}, {city}", size=10, font="dejavu")
+    T(pg, M, 150, "E-mail: jose.muller@example.org", size=10, font="dejavu")
+    T(pg, M, 170, f"Telephone: {p.phone}", size=10, font="dejavu")
+    t.add("NAME", name, 0, probes=[
+        {"kind": "text", "text": name.lower(), "critical": True},
+        {"kind": "text", "text": "müller", "critical": True},
+        {"kind": "text", "text": "ångström", "critical": True}])
+    t.add("ADDRESS", f"{street}, {city}", 0, probes=[
+        {"kind": "text", "text": street.lower(), "critical": True},
+        {"kind": "text", "text": "95110", "critical": True}])
+    t.add("EMAIL", "jose.muller@example.org", 0)
+    t.add("PHONE", p.phone, 0)
+    para(pg, (M, 210, W - M, 280),
+         "El cliente solicitó una copia de su expediente. Los datos anteriores "
+         "deben permanecer en el archivo original únicamente.", size=9,
+         font="dejavu")
+    t.pages = 1
+    return doc
+
+
+def build_annotations(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """PII in a free-text annotation, a sticky note and a form text field."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "CASCADE CARD SERVICES", size=12, font="hebo")
+    T(pg, M, 64, "Dispute form (annotated)", size=9, font="heit")
+    t.keep_it("CASCADE CARD SERVICES", "Dispute form")
+
+    pg.add_freetext_annot(pymupdf.Rect(M, 100, M + 330, 140),
+                          f"Please verify SSN {p.ssn} before processing",
+                          fontsize=9)
+    t.add("SSN", p.ssn, 0)
+    try:
+        pg.add_text_annot(pymupdf.Point(M + 340, 110), f"call {p.phone} first",
+                          icon="Comment")
+        t.add("PHONE", p.phone, 0)
+    except Exception:
+        pass
+
+    widget = pymupdf.Widget()
+    widget.field_name = "cardholder_name"
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    widget.rect = pymupdf.Rect(M, 160, M + 220, 182)
+    widget.field_value = p.name
+    widget.text_fontsize = 9
+    pg.add_widget(widget)
+    t.add("NAME", p.name, 0)
+
+    widget2 = pymupdf.Widget()
+    widget2.field_name = "member_id"
+    widget2.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    widget2.rect = pymupdf.Rect(M, 190, M + 220, 212)
+    widget2.field_value = p.member
+    widget2.text_fontsize = 9
+    pg.add_widget(widget2)
+    t.add("MEMBER", p.member, 0)
+
+    T(pg, M, 250, "Cardholder name", size=8.5, font="hebo")
+    T(pg, M, 280, "Member ID", size=8.5, font="hebo")
+    t.pages = 1
+    return doc
+
+
+def build_bookmarks_attach(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """PII in the outline, the XMP packet and an attached file."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "TRAILHEAD STORES", size=12, font="hebo")
+    T(pg, M, 64, "Account packet", size=9, font="heit")
+    t.keep_it("TRAILHEAD STORES", "Account packet")
+    para(pg, (M, 100, W - M, 200),
+         "This packet contains the account summary, the signed agreement and the "
+         "identity documents supplied with the application.", size=9)
+    doc.set_toc([[1, f"{p.name} - SSN {p.ssn}", 1],
+                 [1, "Account summary", 1]])
+    t.add("NAME", p.name, 0)
+    t.add("SSN", p.ssn, 0)
+    try:
+        doc.set_xml_metadata(
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+            'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            '<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            f"<dc:description><rdf:Alt><rdf:li>{p.ssn}</rdf:li></rdf:Alt>"
+            f"</dc:description><dc:creator><rdf:Seq><rdf:li>{p.name}</rdf:li>"
+            "</rdf:Seq></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>")
+    except Exception:
+        pass
+    t.add("SSN", p.ssn, 0)
+    try:
+        doc.embfile_add("customer_notes.txt",
+                        f"Name: {p.name}\nSSN: {p.ssn}\nPhone: {p.phone}\n"
+                        .encode())
+        t.add("SSN", p.ssn, 0)
+        t.add("PHONE", p.phone, 0)
+    except Exception:
+        pass
+    t.pages = 1
+    return doc
+
+
+def build_two_column(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Newspaper columns: labels in one column, values in the other."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "THE RECORD GAZETTE", size=13, font="hebo")
+    T(pg, M, 64, "Public notice - foreclosure", size=9, font="heit")
+    t.keep_it("THE RECORD GAZETTE", "Public notice")
+    left = (M, 90, 290, 520)
+    right = (320, 90, 560, 520)
+    para(pg, left,
+         "NOTICE IS HEREBY GIVEN that the undersigned will sell at public auction "
+         "the property described below. Borrower name and current address on "
+         "file:", size=8.5)
+    para(pg, right, f"{p.name}\n{p.street}\n{p.city_line}", size=8.5)
+    t.add("NAME", p.name, 0)
+    t.add("ADDRESS", p.full_address, 0)
+    para(pg, (M, 540, 290, 700),
+         "Social Security Number of record, per the affidavit:", size=8.5)
+    T(pg, 320, 545, p.ssn, size=8.5)
+    t.add("SSN", p.ssn, 0)
+    para(pg, (320, 560, 560, 700),
+         f"Loan {p.acct2}, dated 03/14/2019. Trustee may be reached at "
+         f"{p.phone}.", size=8.5)
+    t.add("ACCT", p.acct2, 0)
+    t.add("PHONE", p.phone, 0)
+    t.keep_it("03/14/2019")
+    t.pages = 1
+    return doc
+
+
+def build_rotated_page(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """The whole page is rotated 180 degrees; another block is set at 270 degrees."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "ALDER CREDIT UNION", size=12, font="hebo")
+    T(pg, M, 64, "Share account record", size=9, font="heit")
+    t.keep_it("ALDER CREDIT UNION", "Share account record")
+    for i, (label, value, cat) in enumerate([
+            ("Member", p.name, "NAME"),
+            ("SSN", p.ssn, "SSN"),
+            ("Account", p.acct, "ACCT"),
+            ("Phone", p.phone, "PHONE")]):
+        T(pg, M, 110 + i * 20, f"{label}: {value}", size=9)
+        t.add(cat, value, 0)
+    T(pg, 585, 60, f"Branch copy - {p.email} - {p.member}", size=9, rotate=270)
+    t.add("EMAIL", p.email, 0)
+    t.add("MEMBER", p.member, 0)
+    pg.set_rotation(180)
+    t.pages = 1
+    return doc
+
+
+def build_noisy_scan(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A 120 dpi grey scan, skewed a degree and speckled."""
+    src = pymupdf.open()
+    sp = src.new_page(width=W, height=H)
+    T(sp, M, 60, "COLDWATER MUTUAL", size=12, font="hebo",
+      color=(0.35, 0.35, 0.35))
+    T(sp, M, 80, f"Policy {p.policy}", size=9, color=(0.4, 0.4, 0.4))
+    T(sp, M, 100, f"Insured: {p.name}", size=9, color=(0.4, 0.4, 0.4))
+    T(sp, M, 118, f"SSN: {p.ssn}", size=9, color=(0.4, 0.4, 0.4))
+    para(sp, (M, 140, W - M, 260),
+         f"Coverage for the dwelling at {p.full_address}. Claims line "
+         f"{p.phone}.", size=9, font="tiro")
+    low = sp.get_pixmap(dpi=200).tobytes("jpeg", jpg_quality=75)
+
+    mid = pymupdf.open()
+    mp = mid.new_page(width=W, height=H)
+    mp.insert_image(mp.rect, stream=low)
+    for _ in range(90):
+        x, y = rng.uniform(0, W), rng.uniform(0, H)
+        mp.draw_circle(pymupdf.Point(x, y), 0.6, color=None,
+                       fill=(0.55, 0.55, 0.55))
+    noisy = mp.get_pixmap(dpi=200).tobytes("jpeg", jpg_quality=70)
+    src.close()
+    mid.close()
+
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    pg.insert_image(pg.rect, stream=noisy)
+    pg.set_rotation(1)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_dense_table(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Sixty rows at 6 pt: 240 cells of PII in one block of the page."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 40, "ATLAS STUDENT LOAN", size=11, font="hebo")
+    T(pg, M, 52, "Portfolio extract", size=8, font="heit")
+    t.keep_it("ATLAS STUDENT LOAN", "Portfolio extract")
+    cols = [M, M + 150, M + 250, M + 360]
+    for x, head in zip(cols, ("BORROWER", "SSN", "LOAN", "PHONE")):
+        T(pg, x, 72, head, size=6, font="hebo")
+    for i in range(60):
+        y = 84 + i * 11.6
+        name = f"{rng.choice(FIRST)} {rng.choice(LAST)}"
+        ssn = f"{rng.randint(101,899)}-{rng.randint(10,99)}-{rng.randint(1000,9999)}"
+        loan = f"L{rng.randint(10**7, 10**8 - 1)}"
+        phone = f"(555) {rng.randint(200,999)}-{rng.randint(1000,9999)}"
+        for x, val in zip(cols, (name, ssn, loan, phone)):
+            T(pg, x, y, val, size=6)
+        t.add("NAME", name, 0)
+        t.add("SSN", ssn, 0)
+        t.add("ACCT", loan, 0)
+        t.add("PHONE", phone, 0)
+    t.pages = 1
+    return doc
+
+
+def build_offscreen(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Text placed outside the crop box: invisible, still extractable."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "PINEHURST SAVINGS", size=12, font="hebo")
+    T(pg, M, 64, "Certificate of deposit advice", size=9, font="heit")
+    t.keep_it("PINEHURST SAVINGS", "Certificate of deposit advice")
+    para(pg, (M, 100, W - M, 180),
+         f"Account holder {p.name}, certificate {p.acct2}, maturity 06/30/2024.",
+         size=9)
+    t.add("NAME", p.name, 0)
+    t.add("ACCT", p.acct2, 0)
+    t.keep_it("06/30/2024")
+    # inside the media box but outside the crop box: a reader never sees it,
+    # pdftotext reads it, so a copy that ignored the strip would leak
+    T(pg, M, H - 6, f"Phone {p.phone}", size=9)
+    t.add("PHONE", p.phone, 0)
+    T(pg, M, H - 20, f"SSN {p.ssn}", size=9)
+    t.add("SSN", p.ssn, 0)
+    pg.set_cropbox(pymupdf.Rect(0, 0, W, H - 30))
+    t.pages = 1
+    return doc
+
+
+def build_packed_fields(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Several fields on one line, with and without separators."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=W, height=H)
+    T(pg, M, 50, "IRONWOOD ANALYTICS", size=12, font="hebo")
+    T(pg, M, 64, "Intake summary", size=9, font="heit")
+    t.keep_it("IRONWOOD ANALYTICS", "Intake summary")
+    T(pg, M, 100, f"Name: {p.name}   SSN: {p.ssn}   DOB: {p.dob}", size=9)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("DOB", p.dob)):
+        t.add(cat, val, 0)
+    T(pg, M, 120, f"SSN:{p.ssn} ACCT:{p.acct2} TEL:{p.phone}", size=9)
+    for cat, val in (("SSN", p.ssn), ("ACCT", p.acct2), ("PHONE", p.phone)):
+        t.add(cat, val, 0)
+    T(pg, M, 140, f"Verified: identity of {p.name} confirmed by {p.agent}",
+      size=9)
+    t.add("NAME", p.name, 0)
+    t.add("NAME", p.agent, 0)
+    # a partial: last four only
+    T(pg, M, 170, f"SSN on file ends in {p.ssn[-4:]}; see sealed attachment.",
+      size=9)
+    t.add("SSN", p.ssn[-4:], 0, probes=[
+        {"kind": "text", "text": p.ssn[-4:], "critical": False}])
+    t.pages = 1
+    return doc
+
+
+TRICKY = {
+    "tricky_split_values": build_split_values,
+    "tricky_fake_redaction": build_fake_redaction,
+    "tricky_white_ink": build_white_ink,
+    "tricky_unicode": build_unicode_names,
+    "tricky_annotations": build_annotations,
+    "tricky_bookmarks_attach": build_bookmarks_attach,
+    "tricky_two_column": build_two_column,
+    "tricky_rotated_page": build_rotated_page,
+    "tricky_noisy_scan": build_noisy_scan,
+    "tricky_dense_table": build_dense_table,
+    "tricky_offscreen": build_offscreen,
+    "tricky_packed_fields": build_packed_fields,
+}
+
+
+# ---------------------------------------------------------------------------
+# Image-only documents: no text layer anywhere, the ink is the document
+# ---------------------------------------------------------------------------
+# A QR code is a PNG of "SSN 616-37-4632" (segno, scale 5). Nothing in this
+# pipeline decodes a barcode, so it is here to be counted as the known gap it is.
+QR_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAGkAAABpAQAAAAAR+TCXAAAAqklEQVR42s2UMQ4DIQwEl6Sg5An8"
+    "5O5jJ4GUj8FP7gmUFCechTRJGdnFuUBysxqvF0O+K+MubQHgazuir5If+Km/WkilopfPo5VqiH5MNB"
+    "spQp3dmUgVHLHvJl4NJAOv1gZHeAnUA66aVAYDtnT2DU/R2z6ownRyg2qqQpu8NBOqcEVsgYZVPVVm"
+    "0PkHseupMqlmRJ1FROGaRUQpENcGbY4MB0xWab/ZQX4DW4GbuocGmCcAAAAASUVORK5CYII=")
+
+
+def _raster_page(doc, img_bytes, width=None, height=None):
+    """Put a whole scan on a page as the only content (no text layer)."""
+    page = doc.new_page(width=width or W, height=height or H)
+    page.insert_image(page.rect, stream=img_bytes)
+    return page
+
+
+def _scan_of(draw, dpi=200, jpeg=70, page_wh=(W, H)):
+    """Render a drawn page to JPEG bytes: what a scanner would hand you."""
+    src = pymupdf.open()
+    sp = src.new_page(width=page_wh[0], height=page_wh[1])
+    draw(sp)
+    data = sp.get_pixmap(dpi=dpi).tobytes("jpeg", jpg_quality=jpeg)
+    src.close()
+    return data
+
+
+def _body(sp, p: Person, heading="COLDWATER MUTUAL", size=9, color=(0, 0, 0)):
+    T(sp, 72, 80, heading, size=14, font="hebo", color=color)
+    T(sp, 72, 104, f"Policy {p.policy}", size=size, color=color)
+    T(sp, 72, 122, f"Insured: {p.name}", size=size, color=color)
+    T(sp, 72, 140, f"SSN: {p.ssn}", size=size, color=color)
+    T(sp, 72, 158, f"Address: {p.street}, {p.city_line}", size=size, color=color)
+    T(sp, 72, 176, f"Telephone {p.phone}", size=size, color=color)
+    T(sp, 72, 194, "Premium $184.22   Term 12 months", size=size, color=color)
+
+
+def build_image_photo(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A photograph of a page: skewed, shadowed, warm cast."""
+    raw = _scan_of(lambda sp: _body(sp, p), dpi=150, jpeg=80)
+    mid = pymupdf.open()
+    mp = mid.new_page(width=W, height=H)
+    mp.insert_image(pymupdf.Rect(6, 6, W - 6, H - 6), stream=raw)
+    for i in range(40):                     # shadow gradient down the page
+        y = i * (H / 40)
+        mp.draw_rect(pymupdf.Rect(0, y, W, y + H / 40), color=None,
+                     fill=(0, 0, 0), fill_opacity=0.02 * (i / 40))
+    mp.draw_rect(mp.rect, color=None, fill=(1.0, 0.94, 0.84), fill_opacity=0.18)
+    for _ in range(60):
+        mp.draw_circle(pymupdf.Point(rng.uniform(0, W), rng.uniform(0, H)), 0.8,
+                       color=None, fill=(0.5, 0.5, 0.5), fill_opacity=0.25)
+    photo = mp.get_pixmap(dpi=200).tobytes("jpeg", jpg_quality=72)
+    mid.close()
+
+    doc = pymupdf.open()
+    pg = _raster_page(doc, photo)
+    pg.set_rotation(1.4)                    # the sheet was not square to the lens
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def _rotated_scan(rng, p, t, rotate: int, name: str):
+    raw = _scan_of(lambda sp: _body(sp, p))
+    if rotate in (90, 270):
+        doc = pymupdf.open()
+        pg = doc.new_page(width=H, height=W)
+        pg.insert_image(pg.rect, stream=raw, rotate=rotate)
+    else:
+        doc = pymupdf.open()
+        pg = doc.new_page(width=W, height=H)
+        pg.insert_image(pg.rect, stream=raw, rotate=rotate)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_rot90(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A sheet fed sideways: the ink is upright only at 90 degrees."""
+    return _rotated_scan(rng, p, t, 90, "rot90")
+
+
+def build_image_rot180(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A sheet fed upside down."""
+    return _rotated_scan(rng, p, t, 180, "rot180")
+
+
+def build_image_rot270(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """The other sideways."""
+    return _rotated_scan(rng, p, t, 270, "rot270")
+
+
+def build_image_fax(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A fax: 120 dpi, thin ink, streaks."""
+    raw = _scan_of(lambda sp: _body(sp, p, color=(0.25, 0.25, 0.25)), dpi=120,
+                   jpeg=35)
+    mid = pymupdf.open()
+    mp = mid.new_page(width=W, height=H)
+    mp.insert_image(mp.rect, stream=raw)
+    for _ in range(14):                     # fax streaks
+        y = rng.uniform(0, H)
+        mp.draw_line(pymupdf.Point(0, y), pymupdf.Point(W, y + rng.uniform(-3, 3)),
+                     color=(0.6, 0.6, 0.6), width=0.4)
+    fax = mp.get_pixmap(dpi=140).tobytes("jpeg", jpg_quality=45)
+    mid.close()
+    doc = pymupdf.open()
+    pg = _raster_page(doc, fax)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_lowcontrast(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """Beige paper, pale ink: a scan of a photocopy of a fax."""
+    def draw(sp):
+        sp.draw_rect(sp.rect, color=None, fill=(0.95, 0.92, 0.84))
+        _body(sp, p, color=(0.62, 0.62, 0.62), size=10)
+    raw = _scan_of(draw, dpi=180, jpeg=65)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_watermark(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A big diagonal watermark laid over the content."""
+    def draw(sp):
+        _body(sp, p)
+        sp.insert_text((70, 470), "CONFIDENTIAL - COPY", fontsize=54, fontname="hebo",
+                       color=(0.86, 0.86, 0.86),
+                       morph=(pymupdf.Point(70, 470), pymupdf.Matrix(-38)))
+        sp.insert_text((140, 600), "DO NOT DISTRIBUTE", fontsize=30, fontname="hebo",
+                       color=(0.88, 0.88, 0.88),
+                       morph=(pymupdf.Point(140, 600), pymupdf.Matrix(-38)))
+    raw = _scan_of(draw, dpi=190, jpeg=70)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_stamp(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A rubber stamp struck across the SSN line."""
+    def draw(sp):
+        _body(sp, p)
+        sp.draw_rect(pymupdf.Rect(60, 118, 330, 168), color=(0.7, 0.1, 0.1), width=2)
+        T(sp, 80, 155, "PAID 09/22/2023", size=22, font="hebo", color=(0.7, 0.1, 0.1))
+    raw = _scan_of(draw, dpi=190, jpeg=70)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.keep_it("PAID 09/22/2023")
+    t.pages = 1
+    return doc
+
+
+def build_image_two_column(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A scanned newspaper notice: two columns, PII on the right."""
+    def draw(sp):
+        T(sp, 72, 70, "THE RECORD GAZETTE", size=18, font="hebo")
+        T(sp, 72, 88, "Public notice", size=9, font="heit")
+        para(sp, (72, 110, 290, 500),
+             "NOTICE IS HEREBY GIVEN that the undersigned trustee will sell at "
+             "public auction the property described in the deed of trust. "
+             "Bidders must register in advance with the trustee's office.",
+             size=8.5, font="tiro")
+        para(sp, (320, 110, 540, 260),
+             f"Borrower of record: {p.name}", size=8.5, font="tiro")
+        para(sp, (320, 270, 540, 420),
+             f"Property: {p.full_address}\nLoan number {p.acct2}\n"
+             f"Trustee: {p.phone}", size=8.5, font="tiro")
+    raw = _scan_of(draw, dpi=200, jpeg=72)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("ADDRESS", p.full_address),
+                     ("ACCT", p.acct2), ("PHONE", p.phone)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_idcard(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A photographed ID card filling the page: colour, tiny type, an MRZ-ish strip."""
+    def draw(sp):
+        sp.draw_rect(sp.rect, color=None, fill=(0.86, 0.89, 0.93))
+        sp.draw_rect(pymupdf.Rect(40, 40, W - 40, H - 40), color=(0.2, 0.3, 0.5),
+                     fill=(0.97, 0.97, 0.99), width=2)
+        T(sp, 60, 80, "STATE IDENTIFICATION CARD", size=14, font="hebo",
+          color=(0.2, 0.3, 0.5))
+        sp.draw_rect(pymupdf.Rect(60, 100, 220, 260), color=None, fill=(0.75, 0.75, 0.78))
+        T(sp, 70, 180, "PHOTO", size=12, font="hebo", color=(0.4, 0.4, 0.45))
+        T(sp, 250, 120, f"DL {p.dl}", size=10, font="cour")
+        T(sp, 250, 145, p.last.upper(), size=14, font="hebo")
+        T(sp, 250, 165, p.first.upper(), size=12)
+        T(sp, 250, 190, f"DOB {p.dob}", size=9)
+        T(sp, 250, 210, f"SSN {p.ssn}", size=9)
+        T(sp, 250, 230, p.street, size=9)
+        T(sp, 250, 248, p.city_line, size=9)
+        T(sp, 60, 300, f"{p.dl}<<{p.last.upper()}<<{p.first.upper()}<<{p.dob}", size=8,
+          font="cour")
+    raw = _scan_of(draw, dpi=190, jpeg=75)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("NAME", f"{p.last} {p.first}"),
+                     ("SSN", p.ssn), ("DOB", p.dob), ("ADDRESS", p.full_address),
+                     ("DL", p.dl)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+def build_image_mrz(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A passport data page: printed fields plus two machine-readable lines."""
+    last = p.last.upper().replace("'", "")
+    first = p.first.upper().replace("-", "<")
+    mrz1 = f"P<USA{last}<<{first}" + "<" * max(0, 44 - len(last) - len(first) - 6)
+    mrz2 = f"{p.passport.ljust(9, '<')}USA{p.dob_y % 100:02d}{p.dob_m:02d}{p.dob_d:02d}" \
+           f"{'F'}20301231<<<<<<<<<<<<<<06"
+
+    def draw(sp):
+        T(sp, 72, 70, "UNITED STATES OF AMERICA", size=13, font="hebo")
+        T(sp, 72, 88, "PASSPORT", size=10, font="heit")
+        T(sp, 72, 120, f"Surname: {p.last}", size=10)
+        T(sp, 72, 138, f"Given names: {p.first}", size=10)
+        T(sp, 72, 156, f"Passport No: {p.passport}", size=10)
+        T(sp, 72, 174, f"Date of birth: {p.dob}", size=10)
+        T(sp, 72, 192, f"Place of birth: {p.city}, USA", size=10)
+        T(sp, 40, 640, mrz1[:44], size=9, font="cour")
+        T(sp, 40, 656, mrz2[:44], size=9, font="cour")
+    raw = _scan_of(draw, dpi=200, jpeg=70)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("PASSPORT", p.passport), ("DOB", p.dob),
+                     ("ADDRESS", f"{p.city}, USA")):
+        t.add(cat, val, 0)
+    t.add("NAME", last, 0, probes=[{"kind": "text", "text": last.lower(),
+                                    "critical": True}])
+    t.pages = 1
+    return doc
+
+
+def build_image_handwriting(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A signed form: printed body, the signature written in italic script."""
+    def draw(sp):
+        _body(sp, p)
+        T(sp, 72, 330, "Signature of insured:", size=9, font="hebo")
+        T(sp, 72, 380, p.name, size=26, font="tiit", color=(0.1, 0.1, 0.35))
+        T(sp, 72, 400, "Date: 09/22/2023", size=9)
+    raw = _scan_of(draw, dpi=200, jpeg=75)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("ADDRESS", p.full_address),
+                     ("PHONE", p.phone), ("POLICY", p.policy)):
+        t.add(cat, val, 0)
+    t.keep_it("Signature of insured:", "Date: 09/22/2023")
+    t.pages = 1
+    return doc
+
+
+def build_image_qr(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A barcode: the SSN is in the pixels and nothing in this pipeline decodes it."""
+    qr = base64.b64decode(QR_PNG_B64)
+
+    def draw(sp):
+        _body(sp, p)
+        sp.insert_image(pymupdf.Rect(380, 380, 520, 520), stream=qr)
+        T(sp, 380, 540, "Scan to verify", size=8)
+    raw = _scan_of(draw, dpi=200, jpeg=80)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("PHONE", p.phone)):
+        t.add(cat, val, 0)
+    # known gap: nothing here reads a QR code, so this is reported, not failed
+    t.add("SSN", "616-37-4632", 0, probes=[
+        {"kind": "text", "text": "616-37-4632", "critical": False}])
+    t.pages = 1
+    return doc
+
+
+def build_image_email(rng, p: Person, t: Truth) -> pymupdf.Doc:
+    """A screenshot of an email: header block, quoted body, grey rule."""
+    def draw(sp):
+        sp.draw_rect(sp.rect, color=None, fill=(0.98, 0.98, 0.98))
+        T(sp, 60, 70, "Subject: Your account documents", size=11, font="hebo")
+        T(sp, 60, 90, f"From: {p.name} <{p.email}>", size=9)
+        T(sp, 60, 106, "To: support@coldwater.example", size=9)
+        T(sp, 60, 122, "Date: 22 September 2023 at 09:14", size=9)
+        sp.draw_line(pymupdf.Point(60, 136), pymupdf.Point(560, 136),
+                     color=(0.7, 0.7, 0.7), width=0.8)
+        para(sp, (60, 150, 560, 330),
+             "Hello,\n\nPlease find my details below for the claim. My social "
+             f"security number is {p.ssn} and the policy is {p.policy}. You can "
+             f"reach me on {p.phone}.\n\nThanks,\n{p.name}", size=9.5, font="tiro")
+        sp.draw_rect(pymupdf.Rect(60, 340, 62, 420), color=None, fill=(0.8, 0.8, 0.8))
+        T(sp, 72, 360, f"Member ID {p.member}", size=9)
+    raw = _scan_of(draw, dpi=200, jpeg=78)
+    doc = pymupdf.open()
+    pg = _raster_page(doc, raw)
+    t.image(0, pg.rect, True)
+    for cat, val in (("NAME", p.name), ("SSN", p.ssn), ("EMAIL", p.email),
+                     ("PHONE", p.phone), ("POLICY", p.policy), ("MEMBER", p.member)):
+        t.add(cat, val, 0)
+    t.pages = 1
+    return doc
+
+
+IMAGES = {
+    "image_photo": build_image_photo,
+    "image_rot90": build_image_rot90,
+    "image_rot180": build_image_rot180,
+    "image_rot270": build_image_rot270,
+    "image_fax": build_image_fax,
+    "image_lowcontrast": build_image_lowcontrast,
+    "image_watermark": build_image_watermark,
+    "image_stamp": build_image_stamp,
+    "image_two_column": build_image_two_column,
+    "image_idcard": build_image_idcard,
+    "image_mrz": build_image_mrz,
+    "image_handwriting": build_image_handwriting,
+    "image_qr": build_image_qr,
+    "image_email": build_image_email,
+}
+
+
 def hash_images(path: Path, truth: Truth) -> None:
     """Fill in sha256 for each recorded image, read from the saved file."""
     with pymupdf.open(path) as doc:
@@ -898,10 +1654,19 @@ def main(argv=None) -> int:
     out = Path(argv[0]) if argv else Path("eval/data")
     count = 40
     seed = 7
+    which = "normal"
     if "--count" in argv:
         count = int(argv[argv.index("--count") + 1])
     if "--seed" in argv:
         seed = int(argv[argv.index("--seed") + 1])
+    if "--set" in argv:
+        which = argv[argv.index("--set") + 1]
+    registry = {"normal": BUILDERS, "tricky": TRICKY, "images": IMAGES,
+                "mixed": {**BUILDERS, **TRICKY, **IMAGES}}.get(which)
+    if registry is None:
+        print(f"!! --set must be normal, tricky, images or mixed (got {which})",
+              file=sys.stderr)
+        return 1
 
     docs_dir = out / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -909,14 +1674,14 @@ def main(argv=None) -> int:
         old.unlink()
 
     rng = random.Random(seed)
-    kinds = list(BUILDERS)
+    kinds = list(registry)
     truths = []
     for i in range(count):
         kind = kinds[i % len(kinds)] if i < len(kinds) else rng.choice(kinds)
         person = Person(rng)
         name = f"{i:02d}_{kind}.pdf"
         truth = Truth(name, kind, seed * 1000 + i)
-        doc = BUILDERS[kind](rng, person, truth)
+        doc = registry[kind](rng, person, truth)
         path = docs_dir / name
         doc.save(path)
         doc.close()
@@ -927,7 +1692,7 @@ def main(argv=None) -> int:
               f"imgs={len(truth.images)} keep={len(truth.keep)}")
 
     (out / "truth.json").write_text(json.dumps(
-        {"seed": seed, "count": count, "docs": truths}, indent=1))
+        {"seed": seed, "count": count, "set": which, "docs": truths}, indent=1))
     total_values = sum(len(d["values"]) for d in truths)
     print(f"\n{count} documents, {total_values} planted values -> {out / 'truth.json'}")
     return 0

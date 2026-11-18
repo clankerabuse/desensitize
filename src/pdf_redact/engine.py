@@ -41,8 +41,10 @@ from .layout import (
 from .ocr import (
     DEFAULT_DPI,
     DEFAULT_LANG,
-    ocr_page_words,
+    ocr_page_best,
     ocr_region_words,
+    page_ink_fraction,
+    strong_words,
     word_conf,
 )
 from .patterns import EMAIL_RE, SALUTATION_RE, h, norm, sensitive_tokens
@@ -54,9 +56,10 @@ SAME_LINE_TOL = 0.35       # * label height
 VALUE_BELOW_GAP = 70.0
 BLOCK_GAP = 95.0          # hard stop for a section header's value block
 BLOCK_LINE_GAP = 24.0     # once a block starts, its lines are densely stacked
-MAX_SAME_LINE_VALUES = 10
-MAX_BLOCK_VALUES = 20
+MAX_SAME_LINE_VALUES = 60   # a wide table row is still one row
+MAX_BLOCK_VALUES = 500      # a 60-row table under one header is still one block
 LOW_CONF_LABEL = "UNCLEAR"  # placeholder for a word OCR was not confident about
+INK_FLOOR = 0.0003         # below this a page is blank, not unreadable
 
 # One coverage policy. This used to be a fast/default/full/paranoid ladder, but a
 # level that skipped a pasted ID card because it covered 0.19% of the page was a
@@ -107,6 +110,7 @@ class DocumentResult:
     ocr_pages: int = 0
     image_regions: int = 0      # embedded pictures that were OCR'd
     mode: str = "text"          # text | ocr | mixed
+    unreadable_pages: list[int] = field(default_factory=list)   # OCR found nothing
 
     def as_dict(self) -> dict:
         return {
@@ -116,6 +120,7 @@ class DocumentResult:
             "mode": self.mode,
             "ocr_pages": self.ocr_pages,
             "image_regions_ocrd": self.image_regions,
+            "unreadable_pages": self.unreadable_pages,
             "redactions_by_type": dict(self.counts),
         }
 
@@ -131,7 +136,11 @@ class RedactionResult:
 
     @property
     def clean(self) -> bool:
-        return all(r.clean for r in self.verifications.values())
+        """Clean means: nothing the detectors look for survived, *and* every
+        page was actually read. A page nothing could be read from is not clean,
+        it is unproven."""
+        return (all(r.clean for r in self.verifications.values())
+                and not any(d.unreadable_pages for d in self.documents))
 
     @property
     def total(self) -> int:
@@ -140,6 +149,15 @@ class RedactionResult:
     @property
     def ocr_pages(self) -> int:
         return sum(d.ocr_pages for d in self.documents)
+
+
+def _derotated(words, matrix):
+    """Word boxes read off a turned render, moved into unrotated page space."""
+    out = []
+    for w in words:
+        r = pymupdf.Rect(w[:4]) * matrix
+        out.append((r.x0, r.y0, r.x1, r.y1) + tuple(w[4:]))
+    return out
 
 
 def safe_output_name(path: Path) -> str:
@@ -381,6 +399,137 @@ class Redactor:
         except Exception:
             pass
 
+    # -- objects that are not in the content stream ------------------------
+    def _redact_string(self, text, known_names, name_freq, hashes, counts, vocab,
+                       whole: bool = False):
+        """Replace every detected span in a plain string; return (new, hits).
+
+        `whole` is for short navigational strings -- a bookmark title, an
+        annotation's subject. Replacement is all-or-nothing there: half a title
+        ("Gideon Q. Moreau - SSN [SSN]") still names the person, and nobody needs
+        the rest of a bookmark title to navigate.
+        """
+        if not text:
+            return text, 0
+        spans = detect_in_cell(text, known_names, name_freq)
+        if not spans:
+            return text, 0
+        for start, end, label in spans:
+            counts[label] += 1
+            for tok in sensitive_tokens(text[start:end]):
+                hashes.setdefault(h(tok), label)
+        if whole:
+            return "[REDACTED]", len(spans)
+        out, pos = [], 0
+        for start, end, label in spans:
+            out.append(text[pos:start])
+            out.append(f"[{label}]")
+            pos = max(pos, end)
+        out.append(text[pos:])
+        return "".join(out), len(spans)
+
+    def _scrub_objects(self, doc, known_names, name_freq, hashes, counts, vocab):
+        """Annotations, form fields, outline titles and attached files.
+
+        None of this lives in the page content stream: a copy can look perfectly
+        redacted and still carry the SSN in a sticky note, a text field value, a
+        bookmark title or an attachment.
+        """
+        for page in doc:
+            try:
+                annots = list(page.annots() or [])
+            except Exception:
+                annots = []
+            for annot in annots:
+                try:
+                    info = dict(annot.info or {})
+                except Exception:
+                    continue
+                changed = False
+                for key in ("content", "subject", "title"):
+                    new, hits = self._redact_string(info.get(key) or "", known_names,
+                                                    name_freq, hashes, counts, vocab,
+                                                    whole=(key != "content"))
+                    if hits:
+                        info[key] = new
+                        changed = True
+                if not changed:
+                    continue
+                try:
+                    annot.set_info(**{k: info.get(k, "") for k in
+                                      ("content", "subject", "title")})
+                    annot.update()
+                except Exception:
+                    try:
+                        page.delete_annot(annot)     # cannot rewrite it: drop it
+                    except Exception:
+                        pass
+
+            try:
+                widgets = list(page.widgets() or [])
+            except Exception:
+                widgets = []
+            for widget in widgets:
+                try:
+                    value = widget.field_value or ""
+                except Exception:
+                    continue
+                if not value.strip():
+                    continue
+                new, hits = self._redact_string(value, known_names, name_freq,
+                                                hashes, counts, vocab)
+                if not hits:
+                    # The field *name* is a label: "ssn", "cardholder_name",
+                    # "member_id". A one-off name in a field called "holder"
+                    # has no other label to learn from.
+                    label = label_only(re.sub(r"[_\-]+", " ",
+                                              getattr(widget, "field_name", "") or ""))
+                    if not label:
+                        continue
+                    for tok in sensitive_tokens(value):
+                        hashes.setdefault(h(tok), label)
+                    counts[label] += 1
+                    new = f"[{label}]"
+                try:
+                    widget.field_value = new
+                    widget.update()
+                except Exception:
+                    try:
+                        page.delete_widget(widget)
+                    except Exception:
+                        pass
+
+        try:
+            toc = doc.get_toc() or []
+        except Exception:
+            toc = []
+        new_toc, changed = [], False
+        for level, title, page_no in toc:
+            new, hits = self._redact_string(title, known_names, name_freq,
+                                            hashes, counts, vocab, whole=True)
+            changed = changed or bool(hits)
+            new_toc.append([level, new, page_no])
+        if changed:
+            try:
+                doc.set_toc(new_toc)
+            except Exception:
+                try:
+                    doc.set_toc([])                 # unreadable titles: no outline
+                except Exception:
+                    pass
+
+        # An attachment is a whole second document we cannot see into: drop it.
+        try:
+            names = list(doc.embfile_names() or [])
+        except Exception:
+            names = []
+        for name in names:
+            try:
+                doc.embfile_del(name)
+                counts["ATTACHMENT"] += 1
+            except Exception:
+                pass
+
     # -- public API -------------------------------------------------------
     def redact(self, paths, dry_run: bool = False, debug_marks: bool = False) -> RedactionResult:
         paths = [Path(p) for p in paths]
@@ -399,19 +548,67 @@ class Redactor:
             # Pass 1: decide the mode per page and (where needed) OCR once. The
             # cells are cached so learning, detection and the text-layer rebuild
             # all work from the same OCR output.
-            plans: list[list[_PagePlan]] = []
+            #
+            # Anything the visible box hides (a crop strip, a "gone" footer) is
+            # read as well: the box is widened to the media box for the whole
+            # pass and restored before the copy is saved. pdftotext reads the
+            # strip; a reader does not -- so a copy that ignored it would leak to
+            # exactly the tools this is meant to feed.
+            widened: list[list] = []
             for doc in docs:
+                pairs = []
+                for page in doc:
+                    try:
+                        crop, media = pymupdf.Rect(page.cropbox), pymupdf.Rect(page.mediabox)
+                        if crop != media:
+                            pairs.append((page, crop))
+                            page.set_cropbox(media)
+                    except Exception:
+                        continue
+                widened.append(pairs)
+
+            # A page OCR could not read at all, and a page with ink on it, is
+            # not a clean page: it is an unproven one. Per document, so the run
+            # can say which copy needs a human.
+            unreadable: dict[int, list[int]] = {}
+
+            plans: list[list[_PagePlan]] = []
+            for doc_idx, doc in enumerate(docs):
                 doc_plans = []
                 # xrefs are only unique inside one document: a cache shared
                 # across a batch hands file A's OCR words to file B's picture.
                 image_cache: dict = {}   # (xref, w, h) -> (rect, words): logos repeat
-                for page in doc:
+                # what the *input* says, so the copy's OCR noise cannot be
+                # mistaken for a residual value later
+                src_tokens = [p.get_text("text") for p in doc]
+
+                for pno, page in enumerate(doc):
                     use_ocr = self.ocr == "force" or (
                         self.ocr == "auto" and page_needs_ocr(page))
                     if use_ocr:
-                        words = ocr_page_words(page, dpi=self.dpi, lang=self.lang)
-                        doc_plans.append(_PagePlan(cells=cells_from_words(words, self.gap),
-                                                   ocr_mode=True, words=words))
+                        original_rotation = page.rotation
+                        words, rotation = ocr_page_best(page, dpi=self.dpi,
+                                                       lang=self.lang)
+                        # Group into cells while the words still read normally --
+                        # the clustering assumes horizontal lines -- then move the
+                        # boxes into unrotated page space, which is the frame every
+                        # redaction rectangle is measured in.
+                        cells = cells_from_words(words, self.gap)
+                        if rotation != original_rotation:
+                            # one box per word, shared by the cells and the plan:
+                            # the rebuild skips redacted words by identity, and a
+                            # second copy of a tuple would smuggle the value back
+                            # into the invisible text layer
+                            moved = _derotated(words, page.derotation_matrix)
+                            original = {id(w): nw for w, nw in zip(words, moved)}
+                            for cell in cells:
+                                cell["words"] = [original[id(w)] for w in cell["words"]]
+                            words = moved
+                        page.set_rotation(original_rotation)
+                        if not strong_words(words) and page_ink_fraction(page) > INK_FLOOR:
+                            unreadable.setdefault(doc_idx, []).append(pno)
+                        src_tokens.extend(w[4] for w in words)
+                        doc_plans.append(_PagePlan(cells=cells, ocr_mode=True, words=words))
                         continue
 
                     plan = _PagePlan(cells=page_cells(page, self.gap), ocr_mode=False)
@@ -457,7 +654,7 @@ class Redactor:
             documents: list[DocumentResult] = []
             verifications: dict = {}
 
-            for src, doc, doc_plans in zip(paths, docs, plans):
+            for doc_idx, (src, doc, doc_plans) in enumerate(zip(paths, docs, plans)):
                 doc_counts: Counter = Counter()
                 marks = []          # (page_no, [word tuples], label)
 
@@ -496,8 +693,21 @@ class Redactor:
                         redacted_ids = {id(w) for words, _l in page_marks for w in words}
                         self._rebuild_text_layer(page, pixel_words, redacted_ids)
 
+                self._scrub_objects(doc, known_names, name_freq, hashes, doc_counts, vocab)
                 self._scrub_metadata(doc)
 
+                # restore the visible box / rotation the page came with
+                for page, undo in widened[doc_idx]:
+                    try:
+                        if isinstance(undo, tuple) and undo[0] == "rotation":
+                            page.set_rotation(undo[1])
+                        else:
+                            page.set_cropbox(undo)
+                    except Exception:
+                        pass
+
+                from .verify import tokens as _tokens
+                source_vocab = _tokens(" ".join(src_tokens))
                 dst = self.out_dir / safe_output_name(src)
                 if not dry_run:
                     doc.save(dst, garbage=4, deflate=True, clean=True)
@@ -505,7 +715,8 @@ class Redactor:
 
                     # Verify every copy: the text layer always, and the pixels
                     # that were OCR'd -- proof, not just consistency.
-                    report = scan_copy(dst, hashes, vocab)
+                    report = scan_copy(dst, hashes, vocab,
+                                       source_vocab=source_vocab)
                     if self.verify_deep:
                         pixel_pages = {}
                         for pno, plan in enumerate(doc_plans):
@@ -515,7 +726,8 @@ class Redactor:
                                 pixel_pages[pno] = [r for r, _w in plan.regions]
                         if pixel_pages:
                             report.merge(ocr_rescan(dst, hashes, vocab, lang=self.lang,
-                                                    rects_by_page=pixel_pages))
+                                                    rects_by_page=pixel_pages,
+                                                    source_vocab=source_vocab))
                     verifications[src.name] = report
 
                 ocr_pages = sum(1 for p in doc_plans if p.ocr_mode)
@@ -530,6 +742,7 @@ class Redactor:
                     ocr_pages=ocr_pages,
                     image_regions=sum(len(p.regions) for p in doc_plans),
                     mode=mode,
+                    unreadable_pages=unreadable.get(doc_idx, []),
                 ))
 
             return RedactionResult(documents=documents, counts=counts,

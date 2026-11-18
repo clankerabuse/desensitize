@@ -108,8 +108,8 @@ def test_low_confidence_words_fail_closed(blank_pdf, out_dir, monkeypatch):
         (40, 60, 120, 72, "512-84-9931", 1, 1, 1, 12.0),   # low confidence value
         (40, 90, 120, 102, "Balance", 1, 2, 1, 96.0),       # high confidence label
     ]
-    monkeypatch.setattr("pdf_redact.engine.ocr_page_words",
-                        lambda page, dpi=300, lang="eng": fake_words)
+    monkeypatch.setattr("pdf_redact.engine.ocr_page_best",
+                        lambda page, dpi=300, lang="eng": (fake_words, page.rotation))
     result = Redactor(out_dir=out_dir, ocr="force").redact([blank_pdf])
 
     assert result.counts["UNCLEAR"] == 1

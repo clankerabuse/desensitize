@@ -117,6 +117,16 @@ def main(argv=None) -> int:
             for cat, ln, masked in rep.masked_samples:
                 print(f"      {cat:<9} {ln:>3}  {masked}")
 
+    unreadable = [(d.source.name, d.unreadable_pages) for d in result.documents
+                  if d.unreadable_pages]
+    if unreadable:
+        print("  pages nothing could be read from (the copy cannot be proven "
+              "clean):")
+        for name, pages in unreadable:
+            listing = ", ".join(str(p + 1) for p in pages[:12])
+            more = " ..." if len(pages) > 12 else ""
+            print(f"    {name}: page {listing}{more}")
+
     if not args.quiet:
         print("  RESULT:", "CLEAN" if clean else "REVIEW NEEDED (see above)")
 

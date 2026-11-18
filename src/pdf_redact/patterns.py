@@ -154,6 +154,9 @@ LABELS = [
         r"a\.?k\.?a\.?", r"formerly\s+known\s+as", r"your\s+name", r"full\s+name",
         r"legal\s+name", r"printed\s+name", r"signature\s+name", r"named\s+as",
         r"name\s+of\s+(?:consumer|patient|applicant|employee|member|borrower)",
+        # legal forms name the party instead of the person: "Borrower of record:"
+        r"(?:borrower|owner|holder|trustor|grantor|grantee|trustee|party|"
+        r"person|payee|mortgagor)\s+of\s+record",
         # the person slots that show up on real forms
         r"(?:patient|member|employee|applicant|co-?applicant|borrower|"
         r"insured|subscriber|student|taxpayer|cardholder|card\s+holder|"
@@ -177,6 +180,7 @@ LABELS = [
         r"reference\s+names?|signer|witness|notary|tenant|landlord|claimant|"
         r"policyholder|student|customer|client|spouse|dependent|parent|guardian|"
         r"recipient|attn|attention|capacity|signature\s+of|"
+        r"account\s+holder|acct\.?\s+holder|card\s+holder|holder|"
         # a salutation or signature cue alone in its cell, value underneath
         r"dear|sincerely|regards|best\s+regards|kind\s+regards|thanks|"
         r"thank\s+you|signed|signature|cc",
@@ -237,7 +241,8 @@ PERSON_CTX_RE = re.compile(
     r"insured|subscriber|cardholder|tenant|landlord|claimant|policyholder|"
     r"student|resident|spouse|dependent|parent|guardian|recipient|payee|"
     r"remit\s+to|payable\s+to|pay\s+to|bill\s+to|ship\s+to|sold\s+to|"
-    r"issued\s+to|belongs\s+to|by)(?![A-Za-z])[\s,:'\"]*",
+    r"issued\s+to|belongs\s+to|account\s+holder|acct\.?\s+holder|"
+    r"card\s+holder|by)(?![A-Za-z])[\s,:'\"]*",
     re.I,
 )
 

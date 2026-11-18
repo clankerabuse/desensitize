@@ -18,6 +18,7 @@ probe can never be mistaken for a clean document.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -96,8 +97,15 @@ def ocr_png(path: Path, psm: int = 3) -> str:
         return f"__OCR_FAILED__ {exc}"
 
 
-def page_ocr_text(page, dpi: int, clip=None) -> str:
-    pix = page.get_pixmap(dpi=dpi, clip=clip, alpha=False)
+def page_ocr_text(page, dpi: int, clip=None, rotation=None) -> str:
+    old = page.rotation
+    if rotation is not None and rotation != old:
+        page.set_rotation(rotation)
+    try:
+        pix = page.get_pixmap(dpi=dpi, clip=clip, alpha=False)
+    finally:
+        if rotation is not None and rotation != old:
+            page.set_rotation(old)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
         tmp = Path(fh.name)
     pix.save(tmp)
@@ -107,49 +115,114 @@ def page_ocr_text(page, dpi: int, clip=None) -> str:
         tmp.unlink(missing_ok=True)
 
 
-def stream_text(doc) -> str:
-    """Concatenate every decompressed stream; literal strings live here."""
-    chunks = []
-    for xref in range(1, doc.xref_length()):
+def page_ocr_any(page, dpi: int) -> str:
+    """OCR a page from all four orientations and keep every word of it.
+
+    A probe legible at *any* rotation is a probe the checker has to be able to
+    see. Picking a single "best" read -- by word count, or by how much of it
+    looks like prose -- lets a value hide at the three rotations that were
+    dropped, and a checker that cannot find a value in the input reports it as
+    unverifiable, which looks the same as clean.
+    """
+    base = page.rotation
+    texts = []
+    for delta in (0, 90, 180, 270):
         try:
-            if doc.xref_is_stream(xref):
-                data = doc.xref_stream(xref)
-                if data:
-                    chunks.append(data.decode("latin-1", "ignore"))
+            texts.append(page_ocr_text(page, dpi, rotation=(base + delta) % 360))
         except Exception:
             continue
-    return "\n".join(chunks)
+    return "\n".join(t for t in texts if t)
 
 
-def image_hashes(path: Path) -> dict:
-    out = {}
+def doc_texts(path: Path) -> dict[str, str]:
+    """Every surface that can hold text, as {surface: text}.
+
+    A copy is clean only if the value is gone from all of them: the text layer,
+    a second extractor, annotation contents, form fields, bookmark titles,
+    attached files, DocInfo and the XMP packet.
+    """
+    out = {k: "" for k in ("text", "pdftotext", "annots", "widgets",
+                           "outline", "attachments", "meta", "xmp")}
     with pymupdf.open(path) as doc:
-        for pno, page in enumerate(doc):
-            for info in page.get_image_info(xrefs=True):
-                xref = info.get("xref")
-                if not xref:
-                    continue
-                try:
-                    base = doc.extract_image(xref)
-                except Exception:
-                    continue
-                import hashlib
-                out.setdefault(hashlib.sha256(base["image"]).hexdigest(), pno)
+        out["text"] = "\n".join(p.get_text("text") for p in doc)
+        try:
+            proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                                  capture_output=True, text=True, timeout=180)
+            out["pdftotext"] = proc.stdout or ""
+        except Exception:
+            pass
+
+        annots, widgets = [], []
+        for page in doc:
+            try:
+                for a in page.annots() or []:
+                    info = a.info or {}
+                    annots.append(" ".join(str(info.get(k) or "")
+                                           for k in ("content", "title", "subject")))
+            except Exception:
+                pass
+            try:
+                for w in page.widgets() or []:
+                    widgets.append(f"{w.field_name or ''} {w.field_value or ''}")
+            except Exception:
+                pass
+        out["annots"] = "\n".join(annots)
+        out["widgets"] = "\n".join(widgets)
+
+        try:
+            out["outline"] = "\n".join(entry[1] for entry in doc.get_toc(simple=True))
+        except Exception:
+            pass
+
+        files = []
+        try:
+            for name in doc.embfile_names():
+                data = doc.embfile_get(name)
+                body = data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
+                files.append(f"{name}\n{body}")
+        except Exception:
+            pass
+        out["attachments"] = "\n".join(files)
+
+        try:
+            out["meta"] = "\n".join(str(v) for v in (doc.metadata or {}).values())
+        except Exception:
+            pass
+        try:
+            out["xmp"] = doc.get_xml_metadata() or ""
+        except Exception:
+            pass
     return out
 
 
-def doc_texts(path: Path) -> dict:
+def stream_text(doc) -> str:
+    """Every content stream, decompressed, as one string.
+
+    Glyphs can be painted without any extractor showing them, so the stream is
+    the last place a value can sit and still be rendered to a reader.
+    """
+    parts = []
+    for xref in range(1, doc.xref_length()):
+        try:
+            if not doc.xref_is_stream(xref):
+                continue
+            parts.append(doc.xref_stream(xref).decode("latin-1", "replace"))
+        except Exception:
+            continue
+    return "\n".join(parts)
+
+
+def image_hashes(path: Path) -> set[str]:
+    """SHA-256 of every embedded picture: one that survives untouched is a leak."""
+    digests = set()
     with pymupdf.open(path) as doc:
-        text = "\n".join(p.get_text("text") for p in doc)
-        meta = json.dumps(doc.metadata or {})
-        pages = doc.page_count
-    try:
-        pdftotext = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                                   capture_output=True, text=True, timeout=120).stdout
-    except Exception:
-        pdftotext = ""
-    return {"text": norm_ws(text),
-            "pdftotext": norm_ws(pdftotext), "meta": meta, "pages": pages}
+        for page in doc:
+            for img in page.get_images(full=True):
+                try:
+                    digests.add(hashlib.sha256(doc.extract_image(img[0])["image"]).hexdigest())
+                except Exception:
+                    continue
+    return digests
 
 
 def check_doc(in_path: Path, out_path: Path, entry: dict, dpi: int = 300) -> dict:
@@ -179,17 +252,22 @@ def check_doc(in_path: Path, out_path: Path, entry: dict, dpi: int = 300) -> dic
             res["unverifiable"].append({"probe": probe["text"], "cat": probe["cat"],
                                         "why": "too short"})
             continue
-        if rx.search(inx["text"]) or rx.search(inx["pdftotext"]) or rx.search(in_stream):
+        if any(rx.search(t) for t in inx.values() if t) or rx.search(in_stream):
             continue
-        # pictures may only be legible via OCR; test the planted image boxes
+        # pictures may only be legible via OCR; test the planted image boxes and,
+        # when that fails, the page the way a reader would look at it
         found = False
         if images:
             with pymupdf.open(in_path) as idoc:
                 for im in images:
                     if im["page"] >= idoc.page_count:
                         continue
+                    page = idoc[im["page"]]
                     clip = pymupdf.Rect(im["rect"])
-                    if rx.search(norm_ws(page_ocr_text(idoc[im["page"]], dpi, clip=clip))):
+                    if rx.search(norm_ws(page_ocr_text(page, dpi, clip=clip))):
+                        found = True
+                        break
+                    if rx.search(norm_ws(page_ocr_any(page, dpi))):
                         found = True
                         break
         if not found:
@@ -197,12 +275,15 @@ def check_doc(in_path: Path, out_path: Path, entry: dict, dpi: int = 300) -> dic
                                         "cat": probe["cat"],
                                         "why": "not found in input"})
 
-    # ---- 1. text layer + pdftotext
+    # ---- 1. every object surface: text layer, pdftotext, annots, widgets,
+    #         outline titles, attachments, DocInfo, XMP
     for probe in probes:
         if any(u["probe"] == probe["text"] for u in res["unverifiable"]):
             continue
-        res["leaks"] += find_hits([probe], out["text"], False, "text")
-        res["leaks"] += find_hits([probe], out["pdftotext"], False, "pdftotext")
+        for surface, text in out.items():
+            if not text:
+                continue
+            res["leaks"] += find_hits([probe], text, False, surface)
 
     # ---- 2. content streams (glyphs that no extractor showed us)
     out_stream = out_stream_cache(out_path)
@@ -225,7 +306,7 @@ def check_doc(in_path: Path, out_path: Path, entry: dict, dpi: int = 300) -> dic
     # ---- 3. pixels: whole pages, then each planted picture's box
     with pymupdf.open(out_path) as odoc:
         for pno in range(odoc.page_count):
-            text = norm_ws(page_ocr_text(odoc[pno], dpi))
+            text = norm_ws(page_ocr_any(odoc[pno], dpi))
             if "__OCR_FAILED__" in text:
                 res["ocr_failed"] = True
                 continue
@@ -250,18 +331,11 @@ def check_doc(in_path: Path, out_path: Path, entry: dict, dpi: int = 300) -> dic
                     "context": "", "sha256": im["sha256"][:12],
                 })
 
-    # ---- 5. metadata
-    for probe in probes:
-        rx = probe_regex(probe, confusable=False)
-        if rx and (rx.search(out["meta"]) or rx.search(norm_ws(out["meta"]))):
-            res["leaks"].append({"cat": probe["cat"], "probe": probe["text"],
-                                 "kind": probe["kind"], "critical": True,
-                                 "where": "metadata", "match": "in metadata",
-                                 "context": out["meta"][:120]})
-
-    # ---- 6. collateral: things that must survive
+    # ---- 5. collateral: things that must survive
+    # the copy's layer puts each word on its own line, so compare on one line
+    flat = norm_ws(out["text"]).lower()
     for keep in entry.get("keep", []):
-        if keep.lower() not in out["text"].lower():
+        if norm_ws(keep).lower() not in flat:
             res["keep_lost"].append(keep)
 
     # de-duplicate identical (probe, where) rows

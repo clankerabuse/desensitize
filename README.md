@@ -101,6 +101,30 @@ The pixel proof is always on and is the only check that can catch a rendering-le
 mistake: it OCRs the finished copy again and looks for the redacted values in the
 pixels, limited to the pages and boxes that were actually OCR'd.
 
+### A scan is not always the right way up
+
+A sheet goes into a feeder sideways, or upside down, and the scan comes out that way.
+Tesseract will *half-read* rotated text — it returns `H3LVMA100 TVNLNN` for
+`COLDWATER MUTUAL` with confidences in the 90s — so "it found words" is no evidence
+that the page was read the right way up. Worse, the half-read page comes back with its
+columns interleaved, which breaks every multi-word detector while the tool reports a
+clean copy.
+
+So every scanned page is oriented first: tesseract's orientation detector is asked,
+the page is read at that rotation, and if the result does not look like prose the other
+three rotations are tried and scored. Scoring is on **legible characters**, not word
+count, because confident garbage scores high on word count. Word boxes are then mapped
+back through `derotation_matrix` — page coordinates are the *unrotated* ones, and a
+rectangle taken straight from the turned render lands a quarter turn away.
+
+### A page nothing could be read from is not a clean page
+
+An unreadable scan (too small, too blurred, too faint) yields no words. That used to be
+indistinguishable from a blank page, and the run said `CLEAN`. Now a page with ink on
+it that OCR could not read is reported per page and the run exits `2` — `REVIEW NEEDED`
+— because nothing about that page was proven. Blank sheets stay clean.
+
+
 ## Coverage: everything readable, then proof
 
 There is one policy, not a ladder. It used to have `--level fast|default|full|paranoid`;
@@ -130,6 +154,23 @@ pdf-redact tax.pdf --no-ocr-images        # text layer only -- and then nothing
                                           # proves what was in the pictures
 pdf-redact scan.pdf --ocr force           # a scan wrapped in a junk text layer
 ```
+
+## Objects that are not on the page
+
+Half of a PDF is not the page. Every run also reads, and scrubs:
+
+* **annotations** — free-text notes, sticky notes, comment subjects. The text is
+  redacted in place; an annotation that cannot be rewritten is dropped;
+* **form fields** — a text field's value is PII like any other. It is replaced with
+  a typed placeholder, and the field's *name* is used as its label
+  (`cardholder_name`, `member_id`) when the value carries no other context;
+* **bookmark titles** — replaced whole (`[REDACTED]`) when they match, because half a
+  title still names the person and nobody needs the rest to navigate;
+* **attached files** — dropped, and counted as `ATTACHMENT`: an attachment is a
+  second document the tool cannot see into;
+* **text outside the visible box** — a crop strip or "gone" footer is read too,
+  because `pdftotext` reads it even though a reader does not. The page keeps its
+  original crop on the copy.
 
 ## Pictures inside text PDFs
 
@@ -195,7 +236,8 @@ dispute text. The point is a document that is still *useful*, not a blank page.
 4. **Apply** — redaction annotations over exactly the affected words, `apply_redactions`
    to delete the glyphs, then a small red `[LABEL]` placeholder at the same spot.
 5. **Verify** — the copies are re-read: value regexes are re-run, and every redacted
-   value's SHA-256 digest is compared against the copy's tokens. Generic words that
+   value's SHA-256 digest is compared against the copy's tokens — text layer, OCR'd
+   pixels, annotations, form-field values and bookmark titles. Generic words that
    legitimately remain elsewhere are filtered out so real leaks are not drowned out.
 
 Library use:
@@ -214,7 +256,14 @@ print(report.clean)                                    # True
 
 * **Scanned PDFs depend on OCR accuracy.** A value tesseract misreads badly enough can
   slip past the detectors; that is why the confidence floor, the confusable-glyph
-  patterns and the pixel proof exist. For high-stakes scans, review the copy.
+  patterns and the pixel proof exist. For high-stakes scans, review the copy — a page
+  it could not read at all is reported as `REVIEW NEEDED` rather than signed off.
+* **A barcode is not read.** A QR code holding an SSN is pixels nothing here decodes.
+  The page is still scanned by eye-OCR (which sees a block of noise), so treat a
+  document with codes as unverified by this tool.
+* **Handwriting is not read.** A cursive signature or a handwritten note is a picture
+  of ink: tesseract will not recover it, and the tool does not pretend to. Printed text
+  on the same page is redacted normally.
 * **Tiny pictures are still ignored.** Below 8×4 pt / 64 source pixels nothing is
   examined — there is not enough area for a glyph to survive, but it is a floor, not a
   promise.

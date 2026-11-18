@@ -27,13 +27,15 @@ def main(argv=None) -> int:
     data = Path(arg(argv, "--data", str(ROOT / "eval" / "data")))
     count = arg(argv, "--count", "40")
     seed = arg(argv, "--seed", "7")
+    docset = arg(argv, "--set", "normal")
     dpi = arg(argv, "--dpi", "300")
     regen = "--regen" in argv or not (data / "truth.json").exists()
 
     if regen:
-        print(f"== generating {count} documents (seed {seed}) ==")
+        print(f"== generating {count} documents (seed {seed}, set {docset}) ==")
         subprocess.run([PY, str(ROOT / "eval" / "gen.py"), str(data),
-                        "--count", count, "--seed", seed], check=True)
+                        "--count", count, "--seed", seed, "--set", docset],
+                       check=True)
 
     docs = sorted((data / "docs").glob("*.pdf"))
     out_dir = data / "out"

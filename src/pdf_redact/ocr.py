@@ -12,11 +12,14 @@ scaled from pixels into PDF points.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from functools import lru_cache
 from pathlib import Path
+
+import pymupdf
 
 DEFAULT_DPI = 300
 DEFAULT_LANG = "eng"
@@ -136,3 +139,100 @@ def ocr_region_words(page, rect, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LAN
 def word_conf(word) -> float:
     """Confidence for an OCR word tuple; native PyMuPDF words are trusted (100)."""
     return word[8] if len(word) > 8 else 100.0
+
+
+# A scanned page arrives however the sheet went into the feeder. Tesseract's
+# default model reads one orientation only, so a rotated scan comes back as
+# noise -- and noise used to look like "nothing sensitive here".
+ROTATIONS = (0, 90, 180, 270)
+STRONG_CONF = 70.0
+ENOUGH_STRONG_WORDS = 6
+
+
+def strong_words(words) -> list:
+    return [w for w in words if word_conf(w) >= STRONG_CONF]
+
+
+# "letters, a bracketed placeholder, a number, or money" -- the shapes that
+# survive a correct read and do not survive a wrong one.
+_LEGIBLE_RE = re.compile(
+    r"^(?:[A-Za-z][A-Za-z'’\-]{1,}[.,:;!?)]?|\[[A-Z]+\]|\d{2,}|\$[\d,.]+)$")
+LEGIBLE_ENOUGH = 40
+
+
+def legible_score(words) -> int:
+    """How many characters of this read like words, not like noise.
+
+    Word count alone is not a signal: tesseract is *confident* about garbage,
+    so a sideways line comes back as 'H3LVMA100 TVNLNN' at 90% and outscores
+    the truthful read of a short page. Junk mixes digits into letters or is
+    too short to be a word, so it scores nothing here.
+    """
+    return sum(len(w[4]) for w in words
+               if word_conf(w) >= STRONG_CONF and _LEGIBLE_RE.match(w[4]))
+
+
+def detect_orientation(page, dpi: int = 150):
+    """Ask tesseract which way up the page is. None when it cannot tell.
+
+    Degree of rotation that makes the page upright (0/90/180/270), or None.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+        tmp = Path(fh.name)
+    try:
+        page.get_pixmap(dpi=dpi, alpha=False).save(tmp)
+        proc = subprocess.run([_exe(), str(tmp), "stdout", "--psm", "0"],
+                              capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+    m = re.search(r"Rotate:\s*(\d+)", proc.stdout or "")
+    if not m:
+        return None
+    return int(m.group(1)) % 360 or 0
+
+
+def ocr_page_best(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG):
+    """OCR a page, un-rotating it when the ink is not upright.
+
+    Tesseract's default model will half-read sideways text, so "it found words"
+    is not evidence that the page was the right way up -- and a half-read page
+    comes back with its columns in the wrong order, which silently breaks every
+    multi-word detector. Ask the orientation detector first, then fall back to
+    trying all four rotations when the guess reads poorly.
+
+    Returns ``(words, rotation)``. The page is left at `rotation`, because the
+    word boxes are in that frame and the redactions have to be laid down in the
+    same one; the caller restores the page's own rotation before saving.
+    """
+    base = page.rotation
+    guess = detect_orientation(page) or 0
+    order = [guess] + [d for d in ROTATIONS if d != guess]
+    best = (-1, [], 0)                      # delta, words, legible score
+    for delta in order:
+        try:
+            page.set_rotation((base + delta) % 360)
+            words = ocr_page_words(page, dpi=dpi, lang=lang)
+        except OcrUnavailableError:
+            page.set_rotation(base)
+            raise
+        except Exception:
+            continue
+        score = legible_score(words)
+        if score > best[2]:
+            best = (delta, words, score)
+        if delta == guess and score >= LEGIBLE_ENOUGH:
+            break                          # the guess reads: trust it
+    page.set_rotation((base + best[0]) % 360)
+    return best[1], page.rotation
+
+
+def page_ink_fraction(page, dpi: int = 72) -> float:
+    """How much of the page is not white: is there anything here to read?"""
+    try:
+        pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False)
+    except Exception:
+        return 1.0                     # unknown: assume there is something
+    data = pix.samples
+    return sum(1 for b in data if b < 200) / max(1, len(data))
