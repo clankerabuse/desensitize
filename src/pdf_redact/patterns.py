@@ -21,7 +21,15 @@ SSN_RE = re.compile(
     r")(?![\w-])"
 )
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+\s?@\s?[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+)
+
+# An address clipped by a screenshot edge or a narrow column: "x.y@corp.e".
+# Runs after EMAIL_RE so a complete address keeps the strict match.
+EMAIL_TRUNC_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@\s?[A-Za-z0-9\-]+(?:[.\-][A-Za-z0-9\-]+)*"
+)
 
 PHONE_RE = re.compile(
     r"(?<![\w])(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}(?!\w)"
@@ -46,20 +54,38 @@ NUMBER_RE = re.compile(
     r"(?<![\w\-/])(?=[A-Za-z0-9\-]*\d)[A-Za-z0-9][A-Za-z0-9\-]{7,}(?![\w\-/])"
 )
 
-# Masked identifier tails: "#2756", "XXXXXX8393", "••••1234".
-MASK_TAIL_RE = re.compile(r"(?:#\s?\d{3,6}\b|[Xx*•·]{3,}\s?\d{2,4}\b)")
+# Payment-card numbers: 13-19 digits, with or without 4-digit grouping.
+# Runs after NUMBER_RE so a bare long number keeps its more generic label.
+CARD_RE = re.compile(
+    r"(?<![\w\-])(?:\d{4}[ \-]){3}\d{1,4}(?![\w\-])"
+    r"|(?<![\w\-])\d{13,19}(?![\w\-])"
+)
+
+# Masked identifier tails: "#2756", "XXXXXX8393", "••••1234", "XXXX XXXX XXXX 4412".
+MASK_TAIL_RE = re.compile(
+    r"(?:#\s?\d{3,6}\b|[Xx*•·]{3,}(?:[ \-][Xx*•·]{2,4})*\s?\d{2,4}\b)"
+)
 
 DATE_RE = re.compile(
     r"(?<!\d)(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])[/-](?:\d{4}|\d{2})(?!\d)"
 )
 
+# "October 24, 1983" -- the written date of birth that escapes DATE_RE.
+MONTH_DATE_RE = re.compile(
+    r"(?<![A-Za-z])(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+    r"\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2}(?!\d)",
+    re.I,
+)
+
 PATTERNS = [
     ("SSN", SSN_RE),
     ("EMAIL", EMAIL_RE),
+    ("EMAIL", EMAIL_TRUNC_RE),
     ("PHONE", PHONE_RE),
     ("ADDRESS", ADDRESS_RE),
     ("ZIP", ZIP_RE),
     ("NUMBER", NUMBER_RE),
+    ("NUMBER", CARD_RE),
     ("NUMBER", MASK_TAIL_RE),
 ]
 
@@ -88,6 +114,15 @@ def digit_count(text: str) -> int:
     return len(DIGIT_RE.findall(text))
 
 
+_DATE_TOKEN_RE = re.compile(
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}")
+
+
+def is_date_like(token: str) -> bool:
+    """True for "2023-10-04" / "10/04/2023": a NUMBER_RE hit that is a date."""
+    return bool(_DATE_TOKEN_RE.fullmatch(token))
+
+
 DOB_CTX_RE = re.compile(
     r"\b(dob|date\s+of\s+birth|born|birth\s*(?:date|year)|year\s+of\s+birth|yob)\b",
     re.I,
@@ -100,42 +135,141 @@ ADDRESS_FRAG_RE = re.compile(
     r"^\d{1,6}\s+[A-Za-z][A-Za-z.'\u2019\-]*(?:\s+[A-Za-z][A-Za-z.'\u2019\-]*){0,3}$"
 )
 
+# Form vocabulary that disqualifies an address fragment: "3 Social security
+# wages" is a W-2 box, not somewhere anybody lives.
+FORM_WORDS = set("""
+security wages wage tax taxed withheld medicare insurance number name address
+code date amount total balance employee employer patient member group policy
+claim description quantity qty charge charges period rate hours units
+""".split())
+
 # --------------------------------------------------------------------------
 # Field labels. A cell that is nothing but a label, or a "Label: value" prefix,
 # makes everything after it a value to redact wholesale.
 # --------------------------------------------------------------------------
 LABELS = [
-    ("NAME", [r"consumer\s+name", r"names?", r"former\s+names?", r"also\s+known\s+as",
-              r"a\.k\.a\.?", r"aka", r"formerly\s+known\s+as", r"previous\s+names?",
-              r"other\s+names?", r"reported\s+names?", r"your\s+name", r"full\s+name",
-              r"named\s+as"]),
-    ("SSN", [r"social\s+security\s*(?:number|#|no\.?)?", r"ssn", r"ss\s*#"]),
+    ("NAME", [
+        r"consumer\s+names?", r"names?", r"former\s+names?", r"previous\s+names?",
+        r"other\s+names?", r"reported\s+names?", r"also\s+known\s+as",
+        r"a\.?k\.?a\.?", r"formerly\s+known\s+as", r"your\s+name", r"full\s+name",
+        r"legal\s+name", r"printed\s+name", r"signature\s+name", r"named\s+as",
+        r"name\s+of\s+(?:consumer|patient|applicant|employee|member|borrower)",
+        # the person slots that show up on real forms
+        r"(?:patient|member|employee|applicant|co-?applicant|borrower|"
+        r"insured|subscriber|student|taxpayer|cardholder|card\s+holder|"
+        r"account\s+holder|acct\.?\s+holder|guarantor|responsible\s+party|"
+        r"parent|guardian|spouse|dependent|payee|recipient|signer|"
+        r"contact|reference|supervisor|manager|emergency\s+contact|"
+        r"authorized\s+user|customer|client|owner|tenant|landlord|"
+        r"witness|notary)\s+names?",
+        # "Employee's name, address, and ZIP code" (form boxes)
+        r"employee'?s?\s+name(?:,?\s*address)?(?:,?\s*and\s+zip\s*code)?",
+        # any qualifier + "name" -- but never a company qualifier, or a
+        # "Creditor Names:" field would start redacting creditors
+        r"(?!(?:creditor|company|business|merchant|bank|furnisher|agency|"
+        r"employer|original|collection|school|institution|provider)\b)"
+        r"(?:[A-Za-z][A-Za-z.'’\-]*\s+){1,3}names?",
+        # a bare role word as the label: "Patient:", "Borrower", "Supervisor:"
+        # ("reference" is deliberately absent: it is a column header far more
+        # often than a person, and a header label opens a value block)
+        r"patient|applicant|co-?applicant|borrower|employee|member|insured|"
+        r"subscriber|cardholder|guarantor|supervisor|manager|contact(?:\s+person)?|"
+        r"reference\s+names?|signer|witness|notary|tenant|landlord|claimant|"
+        r"policyholder|student|customer|client|spouse|dependent|parent|guardian|"
+        r"recipient|attn|attention|capacity|signature\s+of|"
+        # a salutation or signature cue alone in its cell, value underneath
+        r"dear|sincerely|regards|best\s+regards|kind\s+regards|thanks|"
+        r"thank\s+you|signed|signature|cc",
+    ]),
+    ("SSN", [r"(?:employee'?s?|taxpayer'?s?|patient'?s?|spouse'?s?)?\s*"
+             r"social\s+security\s*(?:number|#|no\.?|id|nbr)",
+             r"ssn", r"ss\s*#", r"soc\.?\s*sec\.?(?:\s*(?:number|#|no\.?))?",
+             r"social\s+insurance\s+number"]),
     ("EMAIL", [r"e-?mail(?:\s+address)?"]),
-    ("PHONE", [r"phones?(?:\s+numbers?)?", r"phone\s+numbers?", r"former\s+phones?",
-               r"telephone", r"cell(?:ular)?(?:\s+phone)?", r"mobile(?:\s+phone)?"]),
+    ("PHONE", [r"phones?(?:\s+numbers?)?", r"phone\s+numbers?",
+               r"former\s+phones?", r"telephone(?:\s+number)?", r"tel\.?",
+               r"cell(?:ular)?(?:\s+phone)?(?:\s+number)?",
+               r"mobile(?:\s+phone)?(?:\s+number)?",
+               r"(?:work|home|direct|contact|office|fax)\s+(?:phone|number|#|tel)",
+               r"fax(?:\s+number)?"]),
     ("DOB", [r"date\s+of\s+birth", r"dob", r"birth\s*date", r"year\s+of\s+birth",
-             r"birth\s+year", r"yob"]),
-    ("ADDRESS", [r"current\s+address", r"previous\s+address", r"prior\s+address",
-                 r"former\s+address", r"mailing\s+address", r"home\s+address",
+             r"birth\s+year", r"yob", r"born"]),
+    ("ADDRESS", [r"(?:current|previous|prior|former|mailing|home|service|property|"
+                 r"billing|shipping|permanent|street|residence|residential)"
+                 r"\s+address(?:es)?",
                  r"address(?:es)?", r"residence"]),
-    ("EMPLOYER", [r"employers?", r"employer\s+names?", r"employment(?:\s+information)?"]),
-    ("ACCT", [r"account\s*(?:number|#|no\.?)", r"acct\.?\s*(?:number|#|no\.?)",
-              r"acct\b", r"loan\s*(?:number|#)", r"member\s*(?:id|number)",
+    ("EMPLOYER", [r"employers?", r"employer\s+names?", r"place\s+of\s+employment",
+                  r"employment(?:\s+information)?", r"employed\s+by"]),
+    ("ACCT", [r"account\s*(?:number|#|no\.?|id)", r"acct\.?\s*(?:number|#|no\.?)?",
+              r"loan\s*(?:number|#|id)", r"member\s*(?:id|number|#)",
+              r"policy\s*(?:number|#|no\.?|id)",
+              r"group\s*(?:number|#|no\.?|id|code)",
+              r"claim\s*(?:number|#|no\.?|id)",
+              r"mrn", r"medical\s+record\s*(?:number|#|no\.?|id)",
+              r"patient\s*(?:id|number|#)", r"employee\s*(?:id|number|#)",
+              r"subscriber\s*(?:id|number|#)", r"invoice\s*(?:number|#|no\.?)?",
+              r"purchase\s+order\s*(?:number|#|no\.?)?", r"po\s*(?:number|#|no\.?)",
               r"file\s*(?:number|#)", r"control\s*(?:number|#)",
-              r"reference\s*(?:number|#)", r"case\s*(?:number|#)",
-              r"identification\s*(?:number|#)", r"driver'?s?\s*licen[cs]e",
-              r"passport(?:\s*(?:number|#))?", r"routing\s*(?:number|#)"]),
+              r"reference\s*(?:number|#|id|code)", r"case\s*(?:number|#|id)",
+              r"docket\s*(?:number|#|no\.?)", r"permit\s*(?:number|#|no\.?)",
+              r"identification\s*(?:number|#|no\.?)",
+              r"(?:tax|taxpayer)\s*(?:id|identification)\s*(?:number|#|no\.?)?",
+              r"ein", r"itin", r"tin",
+              r"driver'?s?\s*licen[cs]e(?:\s*(?:number|#|no\.?))?",
+              r"passport(?:\s*(?:number|#|no\.?))?",
+              r"routing\s*(?:number|#|no\.?)", r"aba\s*(?:number|#|no\.?)?",
+              r"(?:credit\s+)?card\s*(?:number|#|no\.?)",
+              r"vin", r"vehicle\s+identification\s*(?:number|#)",
+              r"license\s+plate(?:\s*(?:number|#))?",
+              r"confirmation\s*(?:number|#|code)"]),
 ]
 
+# Inline person slots: a salutation, a signature line, a "requested by" clause,
+# or a bare role word ("Borrower Priya O'Brien"). The cue is followed by the name
+# in the same cell, or the next cell down when the layout split them.
+PERSON_CTX_RE = re.compile(
+    r"(?<![A-Za-z])(?:dear|sincerely|regards|signed\s+by|signed|signature(?:\s+of)?|"
+    r"prepared\s+by|prepared\s+for|submitted\s+by|completed\s+by|filled\s+by|"
+    r"referred\s+by|requested\s+by|reviewed\s+by|attn|attention|cc|contact(?:ed)?|"
+    r"supervisor|manager|authorized\s+user|guarantor|responsible\s+party|"
+    r"customer|client|representative|advisor|adjuster|specialist|"
+    r"beneficiary|witness|notary|borrower|applicant|patient|employee|member|"
+    r"insured|subscriber|cardholder|tenant|landlord|claimant|policyholder|"
+    r"student|resident|spouse|dependent|parent|guardian|recipient|payee|"
+    r"remit\s+to|payable\s+to|pay\s+to|bill\s+to|ship\s+to|sold\s+to|"
+    r"issued\s+to|belongs\s+to|by)(?![A-Za-z])[\s,:'\"]*",
+    re.I,
+)
+
+# A salutation or signature cue standing alone in its cell. The name is the next
+# cell down -- and it is a name, not a section header, so it must not open a block.
+SALUTATION_RE = re.compile(
+    r"^\s*(?:dear|sincerely|regards|best\s+regards|kind\s+regards|thanks|"
+    r"thank\s+you|signed|signature|attn|attention|cc|prepared\s+by|"
+    r"submitted\s+by|approved\s+by|reviewed\s+by|signature\s+of)\s*[:,]?\s*$",
+    re.I,
+)
+
+# A field label that ends a "Name: <value>" run when several fields share one cell
+# ("Patient: Jane Doe  DOB: 03/14/1979").
+FIELD_STOP_RE = re.compile(
+    r"\s+(?:dob|d\.o\.b\.?|ssn|mrn|phone|tel|fax|e-?mail|address|account|acct|"
+    r"member|group|policy|claim|date|ref|reference|id|no|num|amount|balance)\b"
+    r"\s*[:#]",
+    re.I,
+)
+
 # Whole cell == a bare label ("Account Number", "Employers:", "Name(s)")
+# The non-capturing group matters: without it `^`/`$` bind to the first/last
+# alternative only, and "Reference Id #2756" matches the bare "reference" rule.
 LABEL_RES = [
-    (lab, [(pat, re.compile(rf"^\s*{pat}\s*:?\s*$", re.I)) for pat in pats])
+    (lab, [(pat, re.compile(rf"^\s*(?:{pat})\s*[:,]?\s*$", re.I)) for pat in pats])
     for lab, pats in LABELS
 ]
 
 # "Label: value" inside one cell
 LABEL_PREFIX_RES = [
-    (lab, [(pat, re.compile(rf"(?<![\w]){pat}\s*:\s*", re.I)) for pat in pats])
+    (lab, [(pat, re.compile(rf"(?<![\w])(?:{pat})\s*:\s*", re.I)) for pat in pats])
     for lab, pats in LABELS
 ]
 
@@ -172,6 +306,11 @@ identify theft victims rights notice notices law laws act section
 new mexico texas california florida georgia virginia maryland etc months years
 days weeks january february march april may june july august september october
 november december mon tue wed thu fri sat sun am pm est cst pst mst edt pdt
+mrn member members group policy claim claims insurer guarantor applicant
+co-applicant borrower insured subscriber cardholder recipient payee supervisor
+manager reference references attn attention signature signed prepared dear
+sincerely regards cc ein itin routing aba cpt hcpcs usage billed portal
+screenshot holder patient employee number numbers id ids
 """.split())
 
 ORG_MARKERS = set("""
@@ -190,6 +329,16 @@ society club hotel restaurant cafe shop inc. dba
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'\u2019\-.]*")
 GAP_OK_RE = re.compile(r"^[ ,.&/'\u2019\-\s]*$")
+
+# All-caps runs are headings, transaction descriptions and org names far more
+# often than they are people. These words disqualify an all-caps candidate even
+# when the same run repeats across the batch.
+ALLCAPS_STOP = set("""
+pos ach purchase purchases deposit deposits transfer transfers withdrawal
+withdrawals recurring payment payroll wire wires atm debit credit online mobile
+savings checking balance balance_due fee fees interest check cheque cheques
+statement summary details information total subtotal description qty invoice
+""".split())
 
 EDGE_PUNCT = " \t.,:;()[]{}\"'!?*-"
 

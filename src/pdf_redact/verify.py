@@ -21,9 +21,20 @@ from dataclasses import dataclass, field
 import pymupdf
 
 from .layout import cells_from_words, page_cells
-from .patterns import PATTERNS, PLACEHOLDER_RE, h, norm
+from .patterns import PATTERNS, PLACEHOLDER_RE, h, is_date_like, norm
 
 _WORD_RE = re.compile(r"\S+")
+
+
+def _count_pattern_hits(text: str) -> Counter:
+    """Re-run the value regexes, minus hits that are plainly not identifiers."""
+    hits: Counter = Counter()
+    for label, rx in PATTERNS:
+        for m in rx.finditer(text):
+            if label == "NUMBER" and is_date_like(m.group(0)):
+                continue          # "2023-10-04" is a date, not an account number
+            hits[label] += 1
+    return hits
 
 
 @dataclass
@@ -65,8 +76,7 @@ def scan_copy(path, redacted_hashes: dict[str, str],
         for page in doc:
             for cell in page_cells(page):
                 text = cell["text"]
-                for label, rx in PATTERNS:
-                    report.pattern_hits[label] += len(rx.findall(text))
+                report.pattern_hits.update(_count_pattern_hits(text))
 
                 seen = set()
                 for m in _WORD_RE.finditer(text):
@@ -115,8 +125,7 @@ def ocr_rescan(path, redacted_hashes: dict[str, str], unredacted_vocab: set[str]
                 words.extend(ocr_page_words(page, dpi=dpi, lang=lang, clip=clip))
             for cell in cells_from_words(words):
                 text = cell["text"]
-                for label, rx in PATTERNS:
-                    report.pattern_hits[label] += len(rx.findall(text))
+                report.pattern_hits.update(_count_pattern_hits(text))
                 for tok in set(_WORD_RE.findall(text)):
                     if PLACEHOLDER_RE.fullmatch(tok):
                         continue

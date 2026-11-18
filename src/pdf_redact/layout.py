@@ -26,14 +26,44 @@ def page_cells(page, gap_threshold: float = DEFAULT_GAP):
 
 
 def cells_from_words(words, gap_threshold: float = DEFAULT_GAP):
-    """Same grouping, for words that came from OCR instead of the text layer."""
+    """Same grouping, for words that came from OCR instead of the text layer.
+
+    Tesseract's line numbers are not reliable enough to group on: two halves of
+    one visual line ("... DOB September 13, 1965") routinely land in different
+    blocks with a 0.2 pt baseline difference. So lines are clustered by their
+    y centre, and a group is only eligible for merging when its box is a normal
+    single-line height (rotated runs and multi-line blocks keep to themselves).
+    """
     by_line = defaultdict(list)
     for w in words:
         by_line[(w[5], w[6])].append(w)
 
-    groups = []
-    for _key, ws in sorted(by_line.items()):
+    lines = []
+    for _key, ws in by_line.items():
         ws.sort(key=lambda w: (w[0], w[7]))
+        y0 = min(w[1] for w in ws)
+        y1 = max(w[3] for w in ws)
+        lines.append({"ws": ws, "y0": y0, "y1": y1})
+    lines.sort(key=lambda L: (L["y0"], L["ws"][0][0]))
+
+    merged: list[dict] = []
+    for line in lines:
+        if merged:
+            prev = merged[-1]
+            h_prev, h_line = prev["y1"] - prev["y0"], line["y1"] - line["y0"]
+            mid_prev = (prev["y0"] + prev["y1"]) / 2
+            mid_line = (line["y0"] + line["y1"]) / 2
+            if (abs(mid_prev - mid_line) <= 2.0 and 3.0 <= h_prev <= 40
+                    and 3.0 <= h_line <= 40):
+                prev["ws"] = prev["ws"] + line["ws"]
+                prev["y0"] = min(prev["y0"], line["y0"])
+                prev["y1"] = max(prev["y1"], line["y1"])
+                continue
+        merged.append(dict(line))
+
+    groups = []
+    for line in merged:
+        ws = sorted(line["ws"], key=lambda w: (w[0], w[7]))
         cur, prev_x1 = [], None
         for w in ws:
             if cur and prev_x1 is not None and (w[0] - prev_x1) > gap_threshold:

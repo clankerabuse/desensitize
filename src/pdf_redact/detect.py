@@ -13,26 +13,34 @@ spans. It combines, in priority order:
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 
 from .patterns import (
     ADDRESS_FRAG_RE,
     ADDRESS_RE,
+    ALLCAPS_STOP,
     DATE_RE,
     DOB_CTX_RE,
+    EMAIL_RE,
+    FIELD_STOP_RE,
+    FORM_WORDS,
     GAP_OK_RE,
     LABEL_PREFIX_RES,
     LABEL_RES,
+    MONTH_DATE_RE,
     NAME_STOP,
     OCR_PATTERNS,
     ORG_LABEL_CONTEXT_RE,
     ORG_MARKERS,
     PATTERNS,
+    PERSON_CTX_RE,
     TOKEN_RE,
     YEAR_RE,
     ZIP_RE,
     digit_count,
+    is_date_like,
 )
 
 
@@ -99,6 +107,13 @@ def name_spans(text: str, known_names: set[str], name_freq: Counter):
                     continue
                 if not [w for w in lower if w not in NAME_STOP and len(w) >= 2]:
                     continue
+                # An all-caps run is a heading or a transaction line until a
+                # labelled field or an email/signature has taught us otherwise.
+                if all(t[0].isupper() for t in win):
+                    if any(w in ALLCAPS_STOP or w in ORG_MARKERS for w in lower):
+                        continue
+                    if not any(w in known_names for w in lower):
+                        continue
                 key2 = " ".join(lower[:2])
                 key3 = " ".join(lower[:3])
                 if not (any(w in known_names for w in lower)
@@ -111,6 +126,32 @@ def name_spans(text: str, known_names: set[str], name_freq: Counter):
                 accepted.append((start, end))
                 spans.append((start, end, "NAME"))
         i = j + 1
+    return spans
+
+
+_PERSON_RUN_RE = re.compile(
+    r"(?<![A-Za-z])([A-Z][A-Za-z'’\-]+(?:\s+(?:[A-Z]\.|[A-Z][A-Za-z'’\-]+)){1,3})"
+)
+
+
+def person_context_spans(text: str):
+    """Names that follow a salutation or signature cue: "Dear Jane Doe,",
+    "Signed by ...", "requested by ...", "cc: ..."."""
+    spans = []
+    for m in PERSON_CTX_RE.finditer(text):
+        run = _PERSON_RUN_RE.match(text, m.end())
+        if not run:
+            continue
+        keep = []
+        for tok in run.group(1).split():
+            low = tok.lower().strip(".")
+            if low in ORG_MARKERS or low in NAME_STOP:
+                break
+            keep.append(tok)
+        if len(keep) < 2:
+            continue                       # one capitalised word is too weak
+        end = m.end() + len(" ".join(keep))
+        spans.append((m.end(), end, "NAME"))
     return spans
 
 
@@ -135,13 +176,23 @@ def detect_in_cell(text: str, known_names: set[str], name_freq: Counter,
                 start = m.end()
                 while start < len(text) and text[start] in " \t:.-":
                     start += 1
-                if start < len(text):
-                    spans.append((start, len(text), lab))
+                end = len(text)
+                if lab == "NAME":
+                    # several fields in one cell: "Patient: Jane Doe DOB: ..."
+                    stop = FIELD_STOP_RE.search(text, start)
+                    if stop:
+                        end = stop.start()
+                    if end - start > 60:
+                        end = start + 60
+                if start < end:
+                    spans.append((start, end, lab))
 
     # 2. value regexes
     for label, rx in PATTERNS:
         for m in rx.finditer(text):
             if m.end() > m.start():
+                if label == "NUMBER" and is_date_like(m.group(0)):
+                    continue        # 2023-10-04 is a date, not an identifier
                 spans.append((m.start(), m.end(), label))
 
     if ocr_mode:
@@ -150,12 +201,22 @@ def detect_in_cell(text: str, known_names: set[str], name_freq: Counter,
                 if digit_count(m.group(0)) >= min_digits:
                     spans.append((m.start(), m.end(), label))
 
-    # 3. contextual date of birth
-    if DOB_CTX_RE.search(text):
-        for m in DATE_RE.finditer(text):
-            spans.append((m.start(), m.end(), "DOB"))
-        for m in YEAR_RE.finditer(text):
-            spans.append((m.start(), m.end(), "DOB"))
+    # 3. contextual date of birth -- only the date that follows the cue, not
+    #    every date in a paragraph that happens to mention a birth
+    dob_cues = [m for m in DOB_CTX_RE.finditer(text)]
+    if dob_cues:
+        taken = []
+        for cue in dob_cues:
+            window = text[cue.end():cue.end() + 30]
+            for rx in (DATE_RE, MONTH_DATE_RE, YEAR_RE):
+                m = rx.search(window)
+                if not m:
+                    continue
+                start, end = cue.end() + m.start(), cue.end() + m.end()
+                if any(start < a[1] and end > a[0] for a in taken):
+                    continue
+                taken.append((start, end))
+                spans.append((start, end, "DOB"))
 
     # 4. bare mentions of a name learned from a labelled field
     for m in TOKEN_RE.finditer(text):
@@ -172,7 +233,10 @@ def detect_in_cell(text: str, known_names: set[str], name_freq: Counter,
     elif ADDRESS_FRAG_RE.match(text.strip()) and _has_street_word(text):
         spans.append((0, len(text), "ADDRESS"))
 
-    # 6. person-name candidates
+    # 6. salutations and signature lines: "Dear Jane Doe,", "Signed by ..."
+    spans.extend(person_context_spans(text))
+
+    # 7. person-name candidates
     spans.extend(name_spans(text, known_names, name_freq))
 
     return merge_spans(spans)
@@ -184,8 +248,11 @@ def _has_state_abbr(text: str) -> bool:
 
 
 def _has_street_word(text: str) -> bool:
+    toks = TOKEN_RE.findall(text)
+    if any(t.lower() in FORM_WORDS for t in toks):
+        return False
     return any(t[:1].isupper() and len(t) >= 4 and t.lower() not in NAME_STOP
-               for t in TOKEN_RE.findall(text))
+               for t in toks)
 
 
 # --------------------------------------------------------------------------
@@ -229,7 +296,25 @@ def learn_names_from_labels(cell_lists) -> set[str]:
                     if m:
                         harvest(cell["text"][m.end():])
                         break
+
+            harvest_emails(cell["text"], learned)
+            for s, e, _lab in person_context_spans(cell["text"]):
+                harvest(cell["text"][s:e])
     return learned
+
+
+def harvest_emails(text: str, learned: set[str]) -> None:
+    """A "first.last@domain" address teaches us both name tokens."""
+    for m in EMAIL_RE.finditer(text):
+        local = m.group(0).split("@")[0]
+        parts = [p for p in re.split(r"[._+%-]", local) if p]
+        if len(parts) < 2:
+            continue                      # "billing@" is not a person
+        for part in parts:
+            low = part.lower()
+            if low.isalpha() and len(low) >= 3 and low not in NAME_STOP \
+                    and low not in ORG_MARKERS:
+                learned.add(low)
 
 
 def build_name_freq(cell_lists) -> Counter:

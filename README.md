@@ -11,7 +11,7 @@ pdf-redact ~/Downloads/creditReport_1234.pdf
 ```
 
 ```
-== redaction summary (counts only, no values) ==
+== redaction summary (full coverage + pixel proof; counts only, no values) ==
   creditReport_1234.pdf  ->  creditReport_redacted.pdf   (12 pages)
       NAME      170
       ADDRESS    51
@@ -66,8 +66,6 @@ pdf-redact report.pdf --dry-run            # counts only, writes nothing
 pdf-redact report.pdf --names people.txt   # force these names to be redacted
 pdf-redact report.pdf --report manifest.json
 pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
-pdf-redact report.pdf --level full         # also OCR icon-sized pictures
-pdf-redact scan.pdf --level paranoid       # full coverage + prove the pixels are clean
 pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 ```
 
@@ -75,7 +73,7 @@ pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
 |---|---|
 | `0` | copies written, self-check clean |
 | `1` | bad usage / missing input |
-| `2` | **review needed** — the self-check (or the paranoid pixel re-scan) still sees something |
+| `2` | **review needed** — the self-check or the pixel re-scan still sees something |
 | `3` | scan and `--ocr off` — refused rather than faked |
 | `4` | OCR requested but tesseract (or the language pack) is missing |
 
@@ -90,7 +88,7 @@ So for a scanned page `pdf-redact`:
 1. renders it (300 dpi by default) and runs **local** tesseract — no upload, no API,
    the language model is a file on disk (`unshare -rn tesseract …` works);
 2. runs the same detectors over OCR words, which carry per-word confidence — any word
-   below `--min-conf` (default 60) is redacted as `[UNCLEAR]` rather than guessed at,
+   below `--min-conf` (default 80) is redacted as `[UNCLEAR]` rather than guessed at,
    and the OCR detectors tolerate glyph confusions (`0/O`, `1/I/l`, `5/S`, `8/B`) so
    an SSN read as `512-84-993I` still matches;
 3. burns the pixels under each redaction (`PDF_REDACT_IMAGE_PIXELS`) — measured on a
@@ -99,42 +97,39 @@ So for a scanned page `pdf-redact`:
    copy still extracts as text and the ordinary self-check verifies a layer we built
    rather than hoping OCR round-trips.
 
-`--verify-deep` (implied by `--level paranoid`) adds the only check that can catch a
-rendering-level mistake: it OCRs the finished copy again and looks for the redacted
-values in the pixels, limited to the pages and boxes that were actually OCR'd.
+The pixel proof is always on and is the only check that can catch a rendering-level
+mistake: it OCRs the finished copy again and looks for the redacted values in the
+pixels, limited to the pages and boxes that were actually OCR'd.
 
-## Levels: how much gets looked at
+## Coverage: everything readable, then proof
 
-One flag sets the coverage policy. Each step only *adds* sources — the text layer is
-always read first — so a higher level never detects less of your text.
+There is one policy, not a ladder. It used to have `--level fast|default|full|paranoid`;
+the ladder is gone, because a level that skipped a pasted ID card covering 0.19% of a
+page produced a copy that *looked* exactly like a clean one.
 
-| `--level` | Reads | Then proves it | Real pair of credit reports |
-|---|---|---|---|
-| `fast` | text layer + pages with no text | text layer | 2.5 s, 0 image regions |
-| `default` | + pictures ≥ 40×12 pt and ≥ 0.5% of the page | text layer | 3.5 s, 12 regions (1 OCR) |
-| `full` | + every picture ≥ 8×4 pt / 64 px, confident-only OCR words | text layer | 4.3 s, 15 regions |
-| `paranoid` | same as `full` | + re-OCRs the pixels that were touched | 6.0 s |
+So every run does all of this:
 
-`full` and `paranoid` raise the OCR confidence floor from 60 to 80, so shaky words
-become `[UNCLEAR]` instead of being read optimistically.
+| Reads | Then proves it |
+|---|---|
+| the text layer; pages with none (OCR); every picture on a text page down to 8×4 pt / 64 px; OCR words below confidence 80 | the copy's text layer, plus a second OCR pass over every page and picture box that was touched |
 
-`paranoid` is the one that closes the loop on scans: the copy's text layer is written
-by us, so scanning it proves consistency, not safety — this level re-OCRs every page
-or image box that was touched and fails the run (exit 2) if anything redacted is still
-readable in the picture. It only OCRs what was OCR'd the first time, so a text-only
-document pays nothing and a report with 15 logo regions pays ~1 s.
+Cost on two real credit reports (25 + 12 pages): 3.5 s to read the text and
+document-sized pictures, 4.3 s once the icon-sized ones are included, 6.0 s with the
+pixel proof. The whole 40-document synthetic corpus in `eval/` takes 13 s.
 
-Anything set explicitly still wins:
+The proof is the part that matters for scans: the copy's text layer is written by us,
+so reading it back proves consistency, not safety. The re-scan reads the **pictures**
+and fails the run (exit 2) if anything redacted is still legible in them. It only
+re-OCRs what was OCR'd the first time, so a text-only document pays nothing.
+
+Three knobs remain, for when you know better than the default:
 
 ```bash
-pdf-redact tax.pdf --level full --min-conf 55     # full coverage, my threshold
-pdf-redact tax.pdf --level fast --ocr-images      # fast, but still look at pictures
+pdf-redact tax.pdf --min-conf 60          # accept shakier OCR words
+pdf-redact tax.pdf --no-ocr-images        # text layer only -- and then nothing
+                                          # proves what was in the pictures
+pdf-redact scan.pdf --ocr force           # a scan wrapped in a junk text layer
 ```
-
-If you don't know which to pick: `default`. Reach for `full` when the document may hide
-IDs in icons or cropped screenshots, `paranoid` when the input is a scan you cannot
-eyeball afterwards, and `fast` when you are batching thousands of clean digital
-statements.
 
 ## Pictures inside text PDFs
 
@@ -143,9 +138,9 @@ is therefore **on by default** for embedded images too:
 
 * `page.get_image_info()` lists the pictures on a page cheaply — no rendering, no OCR —
   so the tool knows where to look before spending anything;
-* images smaller than ~40×12 pt, under 0.5% of the page area, or under 5 000 source
-  pixels are skipped as logos, icons, rules and spacer tiles (a real report had 26 of
-  those per page);
+* only pictures below 8×4 pt or 64 source pixels are skipped — below that there is not
+  enough area for a glyph to survive, and a real report's spacer tiles and rules live
+  there (one report had 26 such per page);
 * each surviving region is rendered and OCR'd on its own, its words are placed in
   absolute page coordinates, and they go through the same detectors as normal text;
 * identical images are OCR'd once and shifted into place — a header logo repeated on
@@ -154,13 +149,12 @@ is therefore **on by default** for embedded images too:
   glyph deletion.
 
 ```bash
-pdf-redact statement.pdf                  # text + images (default level)
-pdf-redact statement.pdf --no-ocr-images  # text layer only, faster
-pdf-redact statement.pdf --level full     # icon-sized pictures too
+pdf-redact statement.pdf                  # text + every picture
+pdf-redact statement.pdf --no-ocr-images  # text layer only, and nothing is proven
 ```
 
-Cost on two real credit reports (25 + 12 pages): 3.5 s at the default level, of which
-~1 s is the one logo the xref cache did not have to redo.
+Cost on two real credit reports (25 + 12 pages): 4.3 s, of which ~1 s is the one logo
+the xref cache did not have to redo.
 
 ## What gets redacted
 
@@ -189,10 +183,15 @@ dispute text. The point is a document that is still *useful*, not a blank page.
 2. **Detection** — per cell: `Label: value` prefixes, then value regexes (SSN, email,
    phone, address, ZIP, long IDs), then DOB context, then learned names, then
    whole-cell address lines, then capitalised person-name candidates.
-3. **Names** — learned from labelled fields (`Consumer Name:`, `Also Known As:`) and from
-   2/3-token capitalised runs that occur **twice or more across the inputs** (a real
-   name repeats in headers; a random proper noun does not). Company vocabulary is
-   excluded so creditor names survive. `--names` gives you a hard override.
+3. **Names** — learned from labelled fields (`Consumer Name:`, `Patient:`, `Borrower`,
+   `Also Known As:`), from the local part of a `first.last@` address, and from
+   salutations/signature lines ("Dear …,", "Sincerely, …", "requested by …"). A bare
+   mention of a learned name is then caught anywhere on the page, including in a
+   header, a footer, prose and a picture. 2/3-token capitalised runs that occur **twice
+   or more across the inputs** are also treated as names, unless the run is
+   organisation vocabulary or an all-caps heading/transaction line — a real name
+   repeats, but "POS PURCHASE NORTHSIDE MARKET" repeats too and is not a person.
+   `--names` gives you a hard override.
 4. **Apply** — redaction annotations over exactly the affected words, `apply_redactions`
    to delete the glyphs, then a small red `[LABEL]` placeholder at the same spot.
 5. **Verify** — the copies are re-read: value regexes are re-run, and every redacted
@@ -215,11 +214,10 @@ print(report.clean)                                    # True
 
 * **Scanned PDFs depend on OCR accuracy.** A value tesseract misreads badly enough can
   slip past the detectors; that is why the confidence floor, the confusable-glyph
-  patterns and `--verify-deep` exist. For high-stakes scans, review the copy.
-* **Small images are skipped unless you ask.** At `default` the tool ignores pictures
-  below 40×12 pt or 0.5% of the page; `--level full` drops that floor to 8×4 pt / 64 px.
-  Below *that* nothing is examined — a face with an ID number printed at 3 pt would be
-  missed no matter the level.
+  patterns and the pixel proof exist. For high-stakes scans, review the copy.
+* **Tiny pictures are still ignored.** Below 8×4 pt / 64 source pixels nothing is
+  examined — there is not enough area for a glyph to survive, but it is a floor, not a
+  promise.
 * **Names are heuristic.** A person's name that appears exactly once, in an unlabelled
   position, can survive. Use `--names` when it matters; the copies are cheap to redo.
 * **Name repetition is measured across the whole run.** Redacting a batch of related
@@ -245,6 +243,15 @@ Tests build a synthetic report in a temp directory (fake names, fake SSNs) that
 reproduces the layouts that broke earlier versions: section headers whose values sit
 below them, multi-column name rows, table rows with far-right values, an address split
 across cells, masked SSNs, and `#1234` identifier tails.
+
+`eval/` is the larger harness. It generates 40 synthetic documents across 14
+archetypes — credit reports, W-2s, statements, insurance letters, invoices, medical
+bills, leases, scans, pasted screenshots, dark-mode captures, a rotated card — with a
+ground-truth manifest of every planted value, runs the tool over the batch, then
+re-derives leaks from the copies on four independent surfaces (text layer,
+`pdftotext`, OCR'd pixels, decompressed content streams) plus a byte-hash check on
+every embedded picture. `python eval/run.py --count 40` prints the
+scorecard; see `eval/README.md`.
 
 ## Licence
 

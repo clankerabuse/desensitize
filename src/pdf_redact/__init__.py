@@ -12,17 +12,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from .engine import (
-    LEVELS,
+    POLICY,
     DocumentResult,
     NoTextLayerError,
     RedactionResult,
     Redactor,
-    resolve_level,
+    resolve_policy,
 )
 from .ocr import OcrUnavailableError, ocr_page_words
 from .verify import VerificationReport, ocr_rescan, scan_copy
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "redact",
@@ -31,8 +31,8 @@ __all__ = [
     "ocr_page_words",
     "OcrUnavailableError",
     "Redactor",
-    "LEVELS",
-    "resolve_level",
+    "POLICY",
+    "resolve_policy",
     "RedactionResult",
     "DocumentResult",
     "VerificationReport",
@@ -42,14 +42,13 @@ __all__ = [
 
 
 def redact(paths, out_dir=None, names_file=None, ocr="auto", dpi=300,
-           level="default", min_conf=None, ocr_images=None) -> RedactionResult:
+           min_conf=None, ocr_images=None) -> RedactionResult:
     """Redact `paths` into `out_dir` (default: ~/Downloads/agent-friendly).
 
-    `level` picks how much is examined: "fast" (text layer + scans), "default"
-    (also document-sized images) or "full" (also every icon-sized image, with a
-    stricter OCR confidence floor). `ocr="auto"` OCRs pages without a text layer;
-    `"off"` refuses scans.
+    There is one coverage policy: text layer, scans, every embedded picture, and
+    a pixel-level re-scan of the finished copy. `ocr="auto"` OCRs pages without a
+    text layer; `"off"` refuses scans.
     """
     out = out_dir or (Path.home() / "Downloads" / "agent-friendly")
-    return Redactor(out_dir=out, names_file=names_file, ocr=ocr, dpi=dpi, level=level,
+    return Redactor(out_dir=out, names_file=names_file, ocr=ocr, dpi=dpi,
                     min_conf=min_conf, ocr_images=ocr_images).redact(paths)

@@ -45,7 +45,7 @@ from .ocr import (
     ocr_region_words,
     word_conf,
 )
-from .patterns import EMAIL_RE, h, norm, sensitive_tokens
+from .patterns import EMAIL_RE, SALUTATION_RE, h, norm, sensitive_tokens
 from .verify import ocr_rescan, scan_copy
 
 PLACEHOLDER_COLOR = (0.62, 0.05, 0.05)
@@ -58,41 +58,40 @@ MAX_SAME_LINE_VALUES = 10
 MAX_BLOCK_VALUES = 20
 LOW_CONF_LABEL = "UNCLEAR"  # placeholder for a word OCR was not confident about
 
-# Coverage levels. Each step only *adds* sources and strictness -- the text layer
-# is always read first, so a level never makes detection worse for real text.
-LEVELS = {
-    # text layer + pages that have none; images ignored
-    "fast": dict(ocr_images=False, min_conf=60.0,
-                 image_min_pt=(40.0, 12.0), image_min_src_px=5000,
-                 image_min_area_frac=0.005),
-    # + pictures big enough to hold a document (the default)
-    "default": dict(ocr_images=True, min_conf=60.0,
-                    image_min_pt=(40.0, 12.0), image_min_src_px=5000,
-                    image_min_area_frac=0.005),
-    # + every picture down to an icon, and redact uncertain OCR words too
-    "full": dict(ocr_images=True, min_conf=80.0,
-                 image_min_pt=(8.0, 4.0), image_min_src_px=64,
-                 image_min_area_frac=0.0),
-    # full coverage + prove it: re-OCR the pixels of every copy before exiting
-    "paranoid": dict(ocr_images=True, min_conf=80.0,
-                     image_min_pt=(8.0, 4.0), image_min_src_px=64,
-                     image_min_area_frac=0.0, verify_deep=True),
+# One coverage policy. This used to be a fast/default/full/paranoid ladder, but a
+# level that skipped a pasted ID card because it covered 0.19% of the page was a
+# level whose owner could not see the leak -- and the copy looked just as clean
+# either way. So: read everything readable, then prove it on the finished copy.
+POLICY = {
+    "ocr_images": True,          # every picture on a text page, not just big ones
+    "min_conf": 80.0,            # shaky OCR words become [UNCLEAR], never guesses
+    "image_min_pt": (8.0, 4.0),  # icon-sized pictures included
+    "image_min_src_px": 64,
+    "image_min_area_frac": 0.0,
+    "verify_deep": True,         # re-OCR the pixels that were touched
 }
 
+# Settings that can still be overridden per run (CLI flags / kwargs).
+OVERRIDABLE = ("ocr_images", "min_conf", "image_min_pt", "image_min_src_px",
+               "image_min_area_frac", "verify_deep")
 
-def resolve_level(level: str, **overrides) -> dict:
-    """Expand a level name into engine settings; explicit overrides win."""
-    if level not in LEVELS:
-        raise ValueError(f"level must be one of: {', '.join(LEVELS)}")
-    cfg = dict(LEVELS[level])
-    cfg.setdefault("verify_deep", False)
-    cfg["level"] = level
+
+def resolve_policy(**overrides) -> dict:
+    """The coverage policy, with any explicit override applied on top."""
+    unknown = set(overrides) - set(OVERRIDABLE)
+    if unknown:
+        raise ValueError(f"unknown coverage setting(s): {', '.join(sorted(unknown))}")
+    cfg = dict(POLICY)
     for key, value in overrides.items():
         if value is not None:
             cfg[key] = value
     return cfg
 
 _VOCAB_RE = re.compile(r"[A-Za-z0-9][\w'\u2019@.\-]*")
+
+# A table-header word ("BALANCE", "STATUS") sitting to the right of another
+# header label. No digits, so a masked value ("XXXX XXXX 4412") is not caught.
+_HEADER_CELL_RE = re.compile(r"^[A-Z][A-Z /&.'()\-]{1,19}$")
 
 
 class NoTextLayerError(RuntimeError):
@@ -127,7 +126,7 @@ class RedactionResult:
     counts: Counter                       # aggregate, by category
     redacted_hashes: dict[str, str]       # digest -> category
     unredacted_vocab: set[str]            # generic words that survive
-    level: str = "default"                # coverage level that produced it
+    verify_deep: bool = True              # did the pixel proof run?
     verifications: dict = field(default_factory=dict)  # name -> VerificationReport
 
     @property
@@ -172,23 +171,22 @@ class Redactor:
     def __init__(self, out_dir: str | Path, names_file: str | Path | None = None,
                  gap: float = 16.0, ocr: str = "auto", dpi: int = DEFAULT_DPI,
                  lang: str = DEFAULT_LANG, min_conf: float | None = None,
-                 ocr_images: bool | None = None, level: str = "default",
+                 ocr_images: bool | None = None,
                  image_min_pt=None, image_min_src_px=None,
                  image_min_area_frac=None, verify_deep: bool | None = None):
         if ocr not in {"auto", "force", "off"}:
             raise ValueError("ocr must be one of: auto, force, off")
-        cfg = resolve_level(level, ocr_images=ocr_images, min_conf=min_conf,
-                            image_min_pt=image_min_pt,
-                            image_min_src_px=image_min_src_px,
-                            image_min_area_frac=image_min_area_frac,
-                            verify_deep=verify_deep)
+        cfg = resolve_policy(ocr_images=ocr_images, min_conf=min_conf,
+                             image_min_pt=image_min_pt,
+                             image_min_src_px=image_min_src_px,
+                             image_min_area_frac=image_min_area_frac,
+                             verify_deep=verify_deep)
         self.out_dir = Path(out_dir)
         self.names_file = names_file
         self.gap = gap
         self.ocr = ocr
         self.dpi = dpi
         self.lang = lang
-        self.level = cfg["level"]
         self.min_conf = cfg["min_conf"]
         self.ocr_images = cfg["ocr_images"]
         self.image_min_pt = cfg["image_min_pt"]
@@ -221,7 +219,7 @@ class Redactor:
             lw = cell["words"][0]
             lab_y0, lab_y1, lab_x = lw[1], lw[3], lw[0]
             tol = max(1.5, (lab_y1 - lab_y0) * SAME_LINE_TOL)
-            header_style = lab_x <= HEADER_MARGIN_X
+            header_style = lab_x <= HEADER_MARGIN_X and not SALUTATION_RE.match(cell["text"])
 
             # values to the right on the same line ("Account Number  XXXX")
             taken = 0
@@ -233,6 +231,8 @@ class Redactor:
                     continue
                 if label_only(c["text"]):
                     continue
+                if _HEADER_CELL_RE.match(c["text"].strip()):
+                    continue          # sibling header, not this label's value
                 self._take(marks, hashes, counts, page_no, c["words"], lab)
                 taken += 1
                 if taken >= MAX_SAME_LINE_VALUES:
@@ -289,8 +289,28 @@ class Redactor:
                     break
 
         # --- span-driven cells -------------------------------------------
+        # A cue on the previous line of the same block still applies to this one:
+        # "our records show date of birth" / "05/18/1973" is one sentence that
+        # wrapping split into two cells.
+        prefixes: dict[int, str] = {}
+        by_block: dict = defaultdict(list)
         for cell in cells:
-            spans = detect_in_cell(cell["text"], known_names, name_freq, ocr_mode=ocr_mode)
+            by_block[cell["words"][0][5]].append(cell)
+        for items in by_block.values():
+            items.sort(key=lambda c: (c["words"][0][1], c["words"][0][0]))
+            prev = ""
+            for c in items:
+                prefixes[id(c)] = prev[-90:]
+                prev = c["text"]
+
+        for cell in cells:
+            prefix = prefixes.get(id(cell), "")
+            full = f"{prefix} {cell['text']}" if prefix else cell["text"]
+            off = len(full) - len(cell["text"])
+            spans = [(max(0, s - off), e - off, lab)
+                     for s, e, lab in detect_in_cell(full, known_names, name_freq,
+                                                     ocr_mode=ocr_mode)
+                     if e - off > 0]
             if not spans:
                 vocab |= {norm(t) for t in _VOCAB_RE.findall(cell["text"])}
             else:
@@ -380,9 +400,11 @@ class Redactor:
             # cells are cached so learning, detection and the text-layer rebuild
             # all work from the same OCR output.
             plans: list[list[_PagePlan]] = []
-            image_cache: dict = {}   # (xref, w, h) -> (rect, words): logos repeat
             for doc in docs:
                 doc_plans = []
+                # xrefs are only unique inside one document: a cache shared
+                # across a batch hands file A's OCR words to file B's picture.
+                image_cache: dict = {}   # (xref, w, h) -> (rect, words): logos repeat
                 for page in doc:
                     use_ocr = self.ocr == "force" or (
                         self.ocr == "auto" and page_needs_ocr(page))
@@ -481,8 +503,8 @@ class Redactor:
                     doc.save(dst, garbage=4, deflate=True, clean=True)
                     dst.chmod(0o600)
 
-                    # Verify every copy: the text layer always, and (at paranoid
-                    # level, or --verify-deep) the pixels that were OCR'd.
+                    # Verify every copy: the text layer always, and the pixels
+                    # that were OCR'd -- proof, not just consistency.
                     report = scan_copy(dst, hashes, vocab)
                     if self.verify_deep:
                         pixel_pages = {}
@@ -512,7 +534,8 @@ class Redactor:
 
             return RedactionResult(documents=documents, counts=counts,
                                    redacted_hashes=hashes, unredacted_vocab=vocab,
-                                   level=self.level, verifications=verifications)
+                                   verify_deep=self.verify_deep,
+                                   verifications=verifications)
         finally:
             for doc in docs:
                 doc.close()

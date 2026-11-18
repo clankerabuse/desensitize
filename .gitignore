@@ -9,3 +9,7 @@ dist/
 # never commit documents, redacted or not
 *.pdf
 agent-friendly/
+
+# eval artefacts: generated documents, truth manifests, run reports
+eval/data/
+eval/results/

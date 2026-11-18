@@ -38,12 +38,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="report what would be redacted, write nothing")
     ap.add_argument("--report", metavar="FILE",
                     help="write a JSON manifest of counts here")
-    ap.add_argument("--level", choices=["fast", "default", "full", "paranoid"],
-                    default="default",
-                    help="how much to look at: fast = text layer + scans, default = + "
-                         "document-sized images (default), full = + every image with a "
-                         "stricter OCR confidence, paranoid = full + re-OCR the copies "
-                         "to prove the pixels are clean")
     ap.add_argument("--ocr", choices=["auto", "force", "off"], default="auto",
                     help="OCR pages without a text layer: auto (default), force every "
                          "page, or off (refuse scans)")
@@ -53,14 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"tesseract language (default {DEFAULT_LANG})")
     ap.add_argument("--min-conf", type=float, default=None,
                     help="OCR words below this confidence are redacted as [UNCLEAR] "
-                         "(default: 60, or 80 at --level full)")
+                         "(default: 80)")
     ap.add_argument("--ocr-images", dest="ocr_images", action="store_true", default=None,
                     help="OCR embedded images on otherwise-textual pages (default: on)")
     ap.add_argument("--no-ocr-images", dest="ocr_images", action="store_false",
-                    help="skip embedded images (text layer only)")
-    ap.add_argument("--verify-deep", dest="verify_deep", action="store_true", default=None,
-                    help="re-OCR the copies and look for leaks in the pixels "
-                         "(implied by --level paranoid)")
+                    help="skip embedded images (text layer only, and nothing proves "
+                         "what was in the pictures)")
     ap.add_argument("--debug-marks", action="store_true",
                     help="print each redaction mark (page, label, position)")
     ap.add_argument("-q", "--quiet", action="store_true", help="counts only, no banner")
@@ -73,8 +65,7 @@ def main(argv=None) -> int:
 
     redactor = Redactor(out_dir=args.out, names_file=args.names, ocr=args.ocr,
                         dpi=args.dpi, lang=args.ocr_lang, min_conf=args.min_conf,
-                        ocr_images=args.ocr_images, level=args.level,
-                        verify_deep=args.verify_deep)
+                        ocr_images=args.ocr_images)
     try:
         result = redactor.redact(args.inputs, dry_run=args.dry_run,
                                  debug_marks=args.debug_marks)
@@ -97,12 +88,13 @@ def main(argv=None) -> int:
         print(f"  would redact {result.total} spans; nothing written (--dry-run)")
         return 0
 
-    # the engine verifies every copy it writes (text layer always, pixels at
-    # --verify-deep / --level paranoid), so there is nothing to re-do here
+    # the engine verifies every copy it writes (text layer + the pixels it OCR'd),
+    # so there is nothing to re-do here
     verifications = result.verifications
 
     if not args.quiet:
-        print(f"== redaction summary (level: {result.level}; counts only, no values) ==")
+        print("== redaction summary (full coverage + pixel proof; counts only, "
+              "no values) ==")
         for doc in result.documents:
             tag = ""
             if doc.ocr_pages:
@@ -131,9 +123,8 @@ def main(argv=None) -> int:
     if args.report:
         manifest = {
             "tool": f"pdf-redact {__version__}",
-            "level": result.level,
-            "verify_deep": bool(result.verifications and
-                                getattr(redactor, "verify_deep", False)),
+            "coverage": "full + pixel proof",
+            "verify_deep": result.verify_deep,
             "inputs": [str(d.source) for d in result.documents],
             "outputs": [d.as_dict() for d in result.documents],
             "redactions_total": result.total,
