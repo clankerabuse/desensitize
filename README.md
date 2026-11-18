@@ -80,6 +80,12 @@ desens scan.pdf --ocr force            # scan wrapped in a junk text layer
 Output directory is `0700`, copies are `0600`, and PDF metadata (title/author/producer)
 is stripped as well.
 
+### For agents
+
+Hermes agents load the `pdf-desensitize` skill (`skill_view(name='pdf-desensitize')`)
+instead of improvising: desensitize first, read only the copy, treat a non-zero exit as
+"do not hand this over", and print counts, never values.
+
 ## Scanned PDFs (OCR)
 
 Scans are a different problem: there is no text to delete, the ink **is** the document.
