@@ -1,6 +1,6 @@
 # eval — does the redaction actually remove the data?
 
-A synthetic benchmark for `pdf-redact`. It builds documents whose sensitive values
+A synthetic benchmark for `desens`. It builds documents whose sensitive values
 are **known**, runs the tool over them, then looks for those values in the copies
 from four independent surfaces. The checker shares no code with the tool: if the
 two disagree, the checker is right.

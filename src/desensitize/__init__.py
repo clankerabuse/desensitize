@@ -1,6 +1,8 @@
-"""pdf-redact: agent-friendly, PII-redacted copies of PDF documents.
+"""desensitize: agent-friendly, PII-redacted copies of PDF documents.
 
-    from pdf_redact import redact
+The command is `desens` (`desensitize` and the old `pdf-redact` also work).
+
+    from desensitize import redact
 
     result = redact(["statement.pdf"], out_dir="~/Downloads/agent-friendly")
     print(result.counts)          # Counter({'ADDRESS': 12, 'NAME': 9, ...})

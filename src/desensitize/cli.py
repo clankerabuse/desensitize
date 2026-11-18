@@ -25,7 +25,7 @@ DEFAULT_OUT = Path.home() / "Downloads" / "agent-friendly"
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="pdf-redact",
+        prog="desens",
         description="Write PII-redacted, agent-friendly copies of PDFs "
                     "(SSN, address, phone, email, DOB, account IDs, names).",
     )
@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--debug-marks", action="store_true",
                     help="print each redaction mark (page, label, position)")
     ap.add_argument("-q", "--quiet", action="store_true", help="counts only, no banner")
-    ap.add_argument("--version", action="version", version=f"pdf-redact {__version__}")
+    ap.add_argument("--version", action="version", version=f"desens {__version__}")
     return ap
 
 
@@ -132,7 +132,7 @@ def main(argv=None) -> int:
 
     if args.report:
         manifest = {
-            "tool": f"pdf-redact {__version__}",
+            "tool": f"desens {__version__}",
             "coverage": "full + pixel proof",
             "verify_deep": result.verify_deep,
             "inputs": [str(d.source) for d in result.documents],

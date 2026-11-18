@@ -1,5 +1,5 @@
 """Unit tests for the value regexes and the label tables."""
-from pdf_redact.patterns import (
+from desensitize.patterns import (
     ADDRESS_RE,
     EMAIL_RE,
     MASK_TAIL_RE,

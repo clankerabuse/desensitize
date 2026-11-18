@@ -6,9 +6,9 @@ import shutil
 import pymupdf
 import pytest
 
-from pdf_redact import Redactor, ocr_page_words, ocr_rescan, scan_copy
-from pdf_redact.engine import NoTextLayerError
-from pdf_redact.ocr import OcrUnavailableError
+from desensitize import Redactor, ocr_page_words, ocr_rescan, scan_copy
+from desensitize.engine import NoTextLayerError
+from desensitize.ocr import OcrUnavailableError
 
 from .conftest import FAKE
 
@@ -108,7 +108,7 @@ def test_low_confidence_words_fail_closed(blank_pdf, out_dir, monkeypatch):
         (40, 60, 120, 72, "512-84-9931", 1, 1, 1, 12.0),   # low confidence value
         (40, 90, 120, 102, "Balance", 1, 2, 1, 96.0),       # high confidence label
     ]
-    monkeypatch.setattr("pdf_redact.engine.ocr_page_best",
+    monkeypatch.setattr("desensitize.engine.ocr_page_best",
                         lambda page, dpi=300, lang="eng": (fake_words, page.rotation))
     result = Redactor(out_dir=out_dir, ocr="force").redact([blank_pdf])
 
@@ -119,7 +119,7 @@ def test_low_confidence_words_fail_closed(blank_pdf, out_dir, monkeypatch):
 
 
 def test_missing_tesseract_is_reported(blank_pdf, out_dir, monkeypatch):
-    monkeypatch.setattr("pdf_redact.ocr.shutil.which", lambda name: None)
-    monkeypatch.setattr("pdf_redact.ocr.tesseract_version", lambda: "")
+    monkeypatch.setattr("desensitize.ocr.shutil.which", lambda name: None)
+    monkeypatch.setattr("desensitize.ocr.tesseract_version", lambda: "")
     with pytest.raises(OcrUnavailableError):
         Redactor(out_dir=out_dir, ocr="force").redact([blank_pdf])

@@ -7,9 +7,9 @@ import json
 import pymupdf
 import pytest
 
-from pdf_redact import redact, scan_copy
-from pdf_redact.cli import main
-from pdf_redact.engine import NoTextLayerError, Redactor, safe_output_name
+from desensitize import redact, scan_copy
+from desensitize.cli import main
+from desensitize.engine import NoTextLayerError, Redactor, safe_output_name
 
 from .fake_data import FAKE
 

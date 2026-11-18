@@ -1,6 +1,6 @@
 """Independent verifier: does the redacted copy still contain the planted values?
 
-Deliberately shares no code with `pdf_redact` -- if the tool's own self-check and
+Deliberately shares no code with `desensitize` -- if the tool's own self-check and
 this disagree, this one is right. Four independent surfaces:
 
 * **text**   -- PyMuPDF text extraction and `pdftotext -layout`

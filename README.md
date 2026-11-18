@@ -1,12 +1,13 @@
-# pdf-redact
+# desensitize
 
-Make **agent-friendly copies** of sensitive PDFs — credit reports, bank statements,
-tax forms, insurance letters — by deleting the personal data and replacing it with
-typed placeholders. Text PDFs lose the glyphs; scanned PDFs — and pictures embedded in
-text PDFs — lose the pixels (and get a clean text layer of their own).
+`desens` — the command — makes **agent-friendly copies** of sensitive PDFs — credit
+reports, bank statements, tax forms, insurance letters — by deleting the personal data
+and replacing it with typed placeholders. Text PDFs lose the glyphs; scans — and
+pictures embedded in text PDFs — lose the pixels (and get a clean text layer of their
+own).
 
 ```bash
-pdf-redact ~/Downloads/creditReport_1234.pdf
+desens ~/Downloads/creditReport_1234.pdf
 # -> ~/Downloads/agent-friendly/creditReport_redacted.pdf
 ```
 
@@ -37,7 +38,7 @@ number in it. Most "redaction" people do before that is a black rectangle drawn 
 the text — which does nothing: the glyphs are still in the content stream and any
 extraction tool reads them straight back out.
 
-`pdf-redact` does the two things that actually matter:
+`desens` does the two things that actually matter:
 
 1. **It deletes the glyphs** (`PyMuPDF` redaction annotations + `apply_redactions`), so
    text extraction, copy-paste and `pdftotext` all come back empty.
@@ -47,7 +48,7 @@ extraction tool reads them straight back out.
 ## Install
 
 ```bash
-uv pip install "git+https://github.com/clankerabuse/pdf-redact"
+uv pip install "git+https://github.com/clankerabuse/desensitize"
 # or, from a clone
 uv pip install -e ".[dev]"
 ```
@@ -60,13 +61,13 @@ refused with a clear error.
 ## Usage
 
 ```bash
-pdf-redact report.pdf                      # redact into ~/Downloads/agent-friendly
-pdf-redact a.pdf b.pdf -o ~/safe           # several files, one output dir
-pdf-redact report.pdf --dry-run            # counts only, writes nothing
-pdf-redact report.pdf --names people.txt   # force these names to be redacted
-pdf-redact report.pdf --report manifest.json
-pdf-redact report.pdf --debug-marks        # where each mark landed (page/x/y)
-pdf-redact scan.pdf --ocr force            # scan wrapped in a junk text layer
+desens report.pdf                      # redact into ~/Downloads/agent-friendly
+desens a.pdf b.pdf -o ~/safe           # several files, one output dir
+desens report.pdf --dry-run            # counts only, writes nothing
+desens report.pdf --names people.txt   # force these names to be redacted
+desens report.pdf --report manifest.json
+desens report.pdf --debug-marks        # where each mark landed (page/x/y)
+desens scan.pdf --ocr force            # scan wrapped in a junk text layer
 ```
 
 | Exit | Meaning |
@@ -83,7 +84,7 @@ is stripped as well.
 ## Scanned PDFs (OCR)
 
 Scans are a different problem: there is no text to delete, the ink **is** the document.
-So for a scanned page `pdf-redact`:
+So for a scanned page `desens`:
 
 1. renders it (300 dpi by default) and runs **local** tesseract — no upload, no API,
    the language model is a file on disk (`unshare -rn tesseract …` works);
@@ -149,10 +150,10 @@ re-OCRs what was OCR'd the first time, so a text-only document pays nothing.
 Three knobs remain, for when you know better than the default:
 
 ```bash
-pdf-redact tax.pdf --min-conf 60          # accept shakier OCR words
-pdf-redact tax.pdf --no-ocr-images        # text layer only -- and then nothing
+desens tax.pdf --min-conf 60          # accept shakier OCR words
+desens tax.pdf --no-ocr-images        # text layer only -- and then nothing
                                           # proves what was in the pictures
-pdf-redact scan.pdf --ocr force           # a scan wrapped in a junk text layer
+desens scan.pdf --ocr force           # a scan wrapped in a junk text layer
 ```
 
 ## Objects that are not on the page
@@ -190,8 +191,8 @@ is therefore **on by default** for embedded images too:
   glyph deletion.
 
 ```bash
-pdf-redact statement.pdf                  # text + every picture
-pdf-redact statement.pdf --no-ocr-images  # text layer only, and nothing is proven
+desens statement.pdf                  # text + every picture
+desens statement.pdf --no-ocr-images  # text layer only, and nothing is proven
 ```
 
 Cost on two real credit reports (25 + 12 pages): 4.3 s, of which ~1 s is the one logo
@@ -243,7 +244,7 @@ dispute text. The point is a document that is still *useful*, not a blank page.
 Library use:
 
 ```python
-from pdf_redact import redact, scan_copy
+from desensitize import redact, scan_copy
 
 result = redact(["statement.pdf"], out_dir="~/safe")
 print(result.counts)                                   # Counter({'SSN': 1, ...})

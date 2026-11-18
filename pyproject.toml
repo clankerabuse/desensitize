@@ -3,14 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pdf-redact"
+name = "desensitize"
 version = "0.8.0"
 description = "Make agent-friendly, PII-redacted copies of PDFs (SSN, address, phone, email, DOB, account IDs, names)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "clankerabuse" }]
-keywords = ["pdf", "redaction", "pii", "privacy", "llm", "agents", "credit-report"]
+keywords = ["pdf", "redaction", "redact", "desensitize", "de-identify", "pii",
+            "privacy", "llm", "agents", "credit-report"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -26,13 +27,15 @@ dependencies = ["pymupdf>=1.24"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
-pdf-redact = "pdf_redact.cli:main"
+desens = "desensitize.cli:main"
+desensitize = "desensitize.cli:main"
+pdf-redact = "desensitize.cli:main"   # legacy alias, pre-rename muscle memory
 
 [project.urls]
-Homepage = "https://github.com/clankerabuse/pdf-redact"
+Homepage = "https://github.com/clankerabuse/desensitize"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pdf_redact"]
+packages = ["src/desensitize"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

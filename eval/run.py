@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = str(ROOT / ".venv" / "bin" / "python")
-CLI = str(ROOT / ".venv" / "bin" / "pdf-redact")
+CLI = str(ROOT / ".venv" / "bin" / "desens")
 
 
 def arg(argv, flag, default=None):
@@ -45,7 +45,7 @@ def main(argv=None) -> int:
     proc = subprocess.run([CLI, *map(str, docs), "-o", str(out_dir),
                            "--report", str(data / "manifest.json"), "-q"],
                           capture_output=True, text=True)
-    print(f"  pdf-redact: exit {proc.returncode}")
+    print(f"  desens: exit {proc.returncode}")
     if proc.returncode not in (0, 2):
         print(proc.stdout[-2000:], proc.stderr[-3000:])
         return proc.returncode

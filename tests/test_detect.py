@@ -1,8 +1,8 @@
 """Unit tests for span detection inside a cell."""
 from collections import Counter
 
-from pdf_redact.detect import detect_in_cell, label_only, name_spans
-from pdf_redact.patterns import h
+from desensitize.detect import detect_in_cell, label_only, name_spans
+from desensitize.patterns import h
 
 
 def labels(text, names=None, freq=None):

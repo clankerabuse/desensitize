@@ -12,8 +12,8 @@ import shutil
 import pymupdf
 import pytest
 
-from pdf_redact import POLICY, Redactor, resolve_policy
-from pdf_redact.cli import main
+from desensitize import POLICY, Redactor, resolve_policy
+from desensitize.cli import main
 
 requires_tesseract = pytest.mark.skipif(
     shutil.which("tesseract") is None, reason="tesseract not installed")
@@ -87,13 +87,13 @@ def test_every_copy_gets_a_verification(report_pdf, out_dir):
 @requires_tesseract
 def test_a_pixel_leak_found_by_the_proof_stops_the_run(image_pdf, out_dir, monkeypatch):
     """The point of the deep check is that it can fail the run."""
-    from pdf_redact.verify import VerificationReport
+    from desensitize.verify import VerificationReport
 
     path, _rect = image_pdf
     fake = VerificationReport()
     fake.leak_total = 3
     fake.leaks_by_category["SSN"] = 3
-    monkeypatch.setattr("pdf_redact.engine.ocr_rescan", lambda *a, **k: fake)
+    monkeypatch.setattr("desensitize.engine.ocr_rescan", lambda *a, **k: fake)
 
     result = Redactor(out_dir=out_dir).redact([path])
     assert result.clean is False
@@ -107,7 +107,7 @@ def test_a_text_only_document_pays_nothing_for_the_proof(report_pdf, out_dir, mo
     def boom(*_a, **_k):
         raise AssertionError("the pixel proof should not run on a text-only document")
 
-    monkeypatch.setattr("pdf_redact.engine.ocr_rescan", boom)
+    monkeypatch.setattr("desensitize.engine.ocr_rescan", boom)
     result = Redactor(out_dir=out_dir).redact([report_pdf])
     assert result.clean is True
 

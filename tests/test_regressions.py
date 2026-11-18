@@ -13,10 +13,10 @@ from collections import Counter
 import pymupdf
 import pytest
 
-from pdf_redact import redact
-from pdf_redact.detect import detect_in_cell, label_only
-from pdf_redact.engine import Redactor
-from pdf_redact.layout import cells_from_words
+from desensitize import redact
+from desensitize.detect import detect_in_cell, label_only
+from desensitize.engine import Redactor
+from desensitize.layout import cells_from_words
 
 requires_tesseract = pytest.mark.skipif(
     shutil.which("tesseract") is None,

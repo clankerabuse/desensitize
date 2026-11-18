@@ -75,7 +75,7 @@ def ocr_page_words(page, dpi: int = DEFAULT_DPI, lang: str = DEFAULT_LANG, clip=
             f"tesseract language '{lang}' not installed (have: {', '.join(sorted(langs))})")
 
     scale = dpi / 72.0          # pixels per point
-    with tempfile.TemporaryDirectory(prefix="pdf-redact-ocr-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="desens-ocr-") as tmp:
         img = Path(tmp) / "page.png"
         pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip)
         pix.save(img)

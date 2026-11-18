@@ -6,8 +6,8 @@ import shutil
 import pymupdf
 import pytest
 
-from pdf_redact import Redactor
-from pdf_redact.layout import image_regions
+from desensitize import Redactor
+from desensitize.layout import image_regions
 
 from .fake_data import FAKE
 
