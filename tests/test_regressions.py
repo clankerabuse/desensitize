@@ -23,6 +23,11 @@ requires_tesseract = pytest.mark.skipif(
     reason="tesseract not installed; OCR paths cannot be exercised",
 )
 
+requires_pdftotext = pytest.mark.skipif(
+    shutil.which("pdftotext") is None,
+    reason="poppler not installed; cannot check the copy against pdftotext",
+)
+
 
 def _text(path) -> str:
     with pymupdf.open(path) as doc:
@@ -256,6 +261,7 @@ def test_attachments_are_dropped(tmp_path):
     assert _objects_of(result.documents[0].output)["attachments"] == []
 
 
+@requires_pdftotext
 def test_text_hidden_by_the_crop_box_is_redacted(tmp_path):
     """A reader never sees the strip; pdftotext reads it."""
     doc = pymupdf.open()
