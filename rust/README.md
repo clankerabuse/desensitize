@@ -64,4 +64,4 @@ cargo build --release   # in rust/
   Python build (ACCT 2, ADDRESS 7, DOB 1, EMAIL 1, EMPLOYER 2, NAME 13,
   NUMBER 2, PHONE 1, SSN 3), both exit 0 with CLEAN self-checks.
 - 40-page text PDF: 0.29 s vs Python 1.09 s (3.8x); startup 2 ms vs 130 ms.
-- scan input: refused with exit 3, matching the contract, until milestone 2.
+- scans: OCR + orientation trials + pixel burn + 200 dpi re-scan, pages parallel; 12-page scan 5.0s vs python 27.3s.
