@@ -17,14 +17,18 @@ installed `desens` until the port reaches full coverage.
 | metadata scrub | ✓ | info dict blanked, garbage=4 + deflate + clean save |
 | annotation scrub | ✓ | contents + subject rewritten with typed placeholders |
 | verify (self-check) | ✓ | pattern rescan + digest-token check + annot/field/outline reads |
-| exit codes 0/1/2/3 | ✓ | 0 clean, 1 usage, 2 review, 3 scan refused |
-| OCR (scans, image regions) | ✗ milestone 2 | scans are refused (exit 3) rather than faked |
-| visible `[LABEL]` placeholders on page | ✗ milestone 2 | annots already get typed placeholders |
-| form-field value rewrite | ✗ milestone 2 | values are verified (exit 2 on leak), never rewritten |
-| annot titles, attachments, TOC rewrite | ✗ milestone 2/3 | outline titles verified; titles/attachments not checkable via public API yet |
+| OCR (scans, orientation) | ✓ | tesseract subprocess, `OMP_THREAD_LIMIT=1`, pages in parallel |
+| image regions on text pages | ✓ | "screenshot of a statement" case, pixels burned + re-scanned |
+| visible `[LABEL]` placeholders | ✓ | drawn via content-stream text ops on every marked page |
+| invisible text layer on scans | ✓ | kept OCR words written render-mode-3, so the copy extracts |
+| form-field value rewrite | ✓ | detect-and-rewrite via field label fallback |
+| unreadable pages | ✓ | ink + no strong words -> exit 2, "cannot be proven clean" |
+| exit codes 0/1/2/3/4 | ✓ | 0 clean, 1 usage, 2 review/unproven, 3 scan+--ocr off, 4 no tesseract |
+| annot titles, attachments, TOC rewrite | ✗ milestone 3 | no public MuPDF API; outline titles verified, not rewritten |
+| distribution (static musl binary, wheels off) | ✗ milestone 3 | |
 
-Milestone-1 caveats are printed on every run and carried in `--report`, so a
-consumer can never mistake partial coverage for the Python build's full proof.
+Milestone caveats are printed on every run and carried in `--report`, so a
+consumer can never mistake partial coverage for full coverage.
 
 ## Build
 

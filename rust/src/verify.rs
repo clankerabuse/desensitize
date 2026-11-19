@@ -212,3 +212,94 @@ pub fn scan_copy(
 
     Ok(report)
 }
+
+/// Deep check: OCR the copy's *pixels* and look for redacted values again
+/// (verify.ocr_rescan). On a scan the text layer is ours (we wrote it), so
+/// scanning it proves only that we are consistent. This re-reads the picture.
+///
+/// `pixel_pages`: ocr_mode pages -> None (whole page), region pages ->
+/// Some(rects). Pages run in parallel (tesseract is one core per call).
+#[allow(clippy::too_many_arguments)]
+pub fn ocr_rescan(
+    path: &str,
+    pixel_pages: &BTreeMap<i32, Option<Vec<ffi::FzRect>>>,
+    redacted_hashes: &Hashes,
+    unredacted_vocab: &Vocab,
+    sample_limit: usize,
+    source_vocab: Option<&Vocab>,
+    dpi: i32,
+    lang: &str,
+    exe: &std::path::Path,
+) -> anyhow::Result<VerificationReport> {
+    use rayon::prelude::*;
+    let entries: Vec<(&i32, &Option<Vec<ffi::FzRect>>)> = pixel_pages.iter().collect();
+    let per_page: Vec<anyhow::Result<VerificationReport>> = entries
+        .into_par_iter()
+        .map(|(&pno, clips)| {
+            let mut rep = VerificationReport::default();
+            let mut words: Vec<ffi::Word> = Vec::new();
+            match clips {
+                None => {
+                    // read the whole page the way a reader would
+                    let best = crate::ocr::ocr_page_best(path, pno, dpi, lang, exe)
+                        .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+                    words.extend(best);
+                }
+                Some(rects) => {
+                    for (i, rect) in rects.iter().enumerate() {
+                        let w = crate::ocr::ocr_region_words(
+                            path, pno, *rect, dpi, lang, (i + 1) as i32, exe,
+                        )?;
+                        words.extend(w);
+                    }
+                }
+            }
+            for cell in crate::layout::cells_from_words(words, crate::layout::DEFAULT_GAP) {
+                let text = &cell.text;
+                for (k, v) in count_pattern_hits(text, source_vocab) {
+                    *rep.pattern_hits.entry(k).or_insert(0) += v;
+                }
+                let mut seen: HashSet<&str> = HashSet::new();
+                for tok in text.split_whitespace() {
+                    if seen.contains(tok) {
+                        continue;
+                    }
+                    let is_ph = tok.starts_with('[')
+                        && tok.ends_with(']')
+                        && tok.len() > 2
+                        && tok[1..tok.len() - 1].chars().all(|c| c.is_ascii_uppercase());
+                    if is_ph {
+                        continue;
+                    }
+                    seen.insert(tok);
+                    let mut cat = redacted_hashes
+                        .get(&crate::patterns::h(tok))
+                        .or_else(|| {
+                            redacted_hashes
+                                .get(&crate::patterns::h(tok.trim_matches(|c: char| ".,:;()".contains(c))))
+                        })
+                        .cloned();
+                    if cat.is_some() && unredacted_vocab.contains(&norm(tok)) {
+                        cat = None;
+                    }
+                    let Some(cat) = cat else { continue };
+                    rep.leak_total += 1;
+                    if std::env::var_os("DS_DEBUG_LEAKS").is_some() {
+                        eprintln!("[debug-leak] {cat} token={tok:?}");
+                    }
+                    *rep.leaks_by_category.entry(cat.clone()).or_insert(0) += 1;
+                    if rep.masked_samples.len() < sample_limit {
+                        rep.masked_samples
+                            .push((cat, tok.chars().count(), mask(tok)));
+                    }
+                }
+            }
+            Ok(rep)
+        })
+        .collect();
+    let mut report = VerificationReport::default();
+    for r in per_page {
+        report.merge(r?);
+    }
+    Ok(report)
+}

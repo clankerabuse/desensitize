@@ -6,7 +6,7 @@
 //! Python tool performs through pymupdf. Metadata is stripped. The verify
 //! pass then re-opens the copy and proves nothing it removed survived.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::detect::{detect_in_cell, label_only, KnownNames, NameFreq, Span};
@@ -34,14 +34,18 @@ pub struct Mark {
     pub label: &'static str,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PagePlan {
     pub cells: Vec<Cell>,
     pub ocr_mode: bool,
+    /// OCR words for the whole page (scans), in display space
+    pub words: Option<Vec<Word>>,
+    /// (bbox, words) for embedded images OCR'd on a text page
+    pub regions: Vec<(FzRect, Vec<Word>)>,
     /// whole-page plain text (source vocabulary for verification)
     pub text: String,
-    /// embedded-image blocks (milestone-1 caveat: pixels not proven)
-    pub image_blocks: i32,
+    /// embedded images seen on the page (region OCR input / reporting)
+    pub images: Vec<ffi::ImageInfo>,
 }
 
 pub struct DocumentResult {
@@ -429,26 +433,151 @@ pub fn scrub_annots(
     Ok(rewritten)
 }
 
+/// Typed placeholders drawn where marks landed (engine._draw_placeholders).
+/// One per spot: stacked cells would otherwise paint a wall of brackets.
+pub fn placeholder_ops(page_marks: &[(Vec<Word>, &'static str)]) -> Vec<ffi::TextOp> {
+    let mut drawn: Vec<(f32, f32)> = Vec::new();
+    let mut ops = Vec::new();
+    for (words, label) in page_marks {
+        let Some(w) = words.first() else { continue };
+        if drawn
+            .iter()
+            .any(|&(px, py)| (w.x0 - px).abs() < 14.0 && (w.y0 - py).abs() < 4.0)
+        {
+            continue;
+        }
+        drawn.push((w.x0, w.y0));
+        let h = w.y1 - w.y0;
+        let h = if h == 0.0 { 8.0 } else { h };
+        let size = 4.5f32.max(7.5f32.min(h * 0.72));
+        ops.push(ffi::TextOp {
+            x: w.x0 + 0.6,
+            y: w.y1 - 0.22 * size,
+            size,
+            r: 0.62,
+            g: 0.05,
+            b: 0.05,
+            invisible: false,
+            text: format!("[{label}]"),
+        });
+    }
+    ops
+}
+
+/// Invisible text-layer words for pages whose pixels were OCR'd, so the copy
+/// still extracts as text without OCR round-tripping
+/// (engine._rebuild_text_layer). Redacted words are skipped.
+pub fn rebuild_ops(
+    pixel_words: &[Word],
+    redacted: &HashSet<(u32, u32, String)>,
+) -> Vec<ffi::TextOp> {
+    let mut ops = Vec::new();
+    for w in pixel_words {
+        let key = (w.x0.to_bits(), w.y1.to_bits(), w.text.clone());
+        if redacted.contains(&key) {
+            continue;
+        }
+        let h = (w.y1 - w.y0) * 0.9;
+        let h = 4.0f32.max(16.0f32.min(if h == 0.0 { 8.0 } else { h }));
+        ops.push(ffi::TextOp {
+            x: w.x0,
+            y: w.y1 - 0.22 * h,
+            size: h,
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            invisible: true,
+            text: w.text.clone(),
+        });
+    }
+    ops
+}
+
+/// Rewrite form-field values carrying PII (engine._scrub_objects widget part).
+/// The field *name* is a label: "ssn", "cardholder_name" -- a one-off value
+/// under a labelled field has no other label to learn from.
+pub fn scrub_widgets(
+    doc: &ffi::WriteDoc,
+    pages: i32,
+    known_names: &KnownNames,
+    name_freq: &NameFreq,
+    hashes: &mut Hashes,
+    counts: &mut Counts,
+) -> anyhow::Result<usize> {
+    let mut rewritten = 0usize;
+    for page in 0..pages {
+        let texts = doc.widget_texts(page)?;
+        for i in 0..texts.len() / 2 {
+            let value = &texts[i * 2];
+            let field_label = &texts[i * 2 + 1];
+            if value.trim().is_empty() {
+                continue;
+            }
+            let (new, hits) = redact_string(value, known_names, name_freq, hashes, counts, false);
+            if hits == 0 {
+                let normalized = field_label.replace(['_', '-'], " ");
+                let Some(lab) = label_only(&normalized) else {
+                    continue;
+                };
+                for tok in sensitive_tokens(value) {
+                    hashes
+                        .entry(crate::patterns::h(&tok))
+                        .or_insert_with(|| lab.to_string());
+                }
+                *counts.entry(lab.to_string()).or_insert(0) += 1;
+                doc.set_widget_value(page, i as i32, &format!("[{lab}]"))?;
+            } else {
+                doc.set_widget_value(page, i as i32, &new)?;
+            }
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
 /// Burn the planned marks into the document and write the copy.
+/// `smear_pages` get image pixels burned (scans / image regions);
+/// `pixel_words_by_page` get an invisible text layer of the words we kept.
 pub fn apply_and_save(
     doc: &ffi::WriteDoc,
     pages: i32,
     marks_by_page: &BTreeMap<i32, Vec<(Vec<Word>, &'static str)>>,
+    smear_pages: &BTreeSet<i32>,
+    pixel_words_by_page: &BTreeMap<i32, Vec<Word>>,
     out_path: &Path,
 ) -> anyhow::Result<usize> {
     let mut applied = 0usize;
     for page in 0..pages {
-        let Some(page_marks) = marks_by_page.get(&page) else { continue };
+        let page_marks = marks_by_page.get(&page);
+        let pixel_words = pixel_words_by_page.get(&page);
+
+        if page_marks.is_none() || page_marks.is_some_and(|m| m.is_empty()) {
+            // nothing to redact, but OCR'd pixels still need a text layer
+            if let Some(words) = pixel_words {
+                doc.write_text_ops(page, &rebuild_ops(words, &HashSet::new()))?;
+            }
+            continue;
+        }
+        let page_marks = page_marks.unwrap();
         let rects: Vec<FzRect> = page_marks
             .iter()
             .flat_map(|(words, _)| words.iter())
             .map(|w| FzRect { x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1 })
             .collect();
-        if rects.is_empty() {
-            continue;
-        }
-        doc.apply_redactions(page, &rects, false)?;
+        let smear = smear_pages.contains(&page);
+        doc.apply_redactions(page, &rects, smear)?;
         applied += rects.len();
+
+        // typed placeholders, then the invisible layer of kept words
+        doc.write_text_ops(page, &placeholder_ops(page_marks))?;
+        if let Some(words) = pixel_words {
+            let redacted: HashSet<(u32, u32, String)> = page_marks
+                .iter()
+                .flat_map(|(ws, _)| ws.iter())
+                .map(|w| (w.x0.to_bits(), w.y1.to_bits(), w.text.clone()))
+                .collect();
+            doc.write_text_ops(page, &rebuild_ops(words, &redacted))?;
+        }
     }
     doc.scrub_metadata()?;
     doc.save(&out_path.display().to_string())?;

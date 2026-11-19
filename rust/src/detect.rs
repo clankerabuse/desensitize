@@ -116,7 +116,7 @@ pub fn name_spans(text: &str, known_names: &KnownNames, name_freq: &NameFreq) ->
                 continue;
             }
             for s in 0..=(cap.len() - size) {
-                let win: Vec<usize> = (s..s + size).collect();
+                let win: Vec<usize> = (s..s + size).map(|slot| cap[slot]).collect();
                 let lower: Vec<String> = win
                     .iter()
                     .map(|&k| toks[k].0.to_lowercase())

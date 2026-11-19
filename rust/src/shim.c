@@ -384,3 +384,274 @@ int ds_save_document(fz_context *ctx, fz_document *doc_, const char *path)
 	}
 	return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Rendering for OCR (milestone 2)                                    */
+/* ------------------------------------------------------------------ */
+
+int ds_render_png(fz_context *ctx, fz_document *doc, int number, double dpi,
+	int delta_deg, const fz_rect *clip_or_null, int gray,
+	const char *out_path, fz_matrix *out_ctm)
+{
+	fz_page *page = NULL;
+	fz_pixmap *pix = NULL;
+	fz_device *dev = NULL;
+	fz_matrix ctm;
+	fz_rect bounds, tb;
+	fz_irect ibox;
+	double s = dpi / 72.0;
+
+	fz_var(page);
+	fz_var(pix);
+	fz_var(dev);
+
+	fz_try(ctx)
+	{
+		page = fz_load_page(ctx, doc, number);
+		bounds = fz_bound_page(ctx, page);
+		if (clip_or_null)
+		{
+			fz_rect clip = *clip_or_null;
+			bounds = fz_intersect_rect(bounds, clip);
+		}
+
+		/* display -> render: scale, then rotate by delta (pymupdf
+		 * set_rotation equivalent), then translate into view */
+		ctm = fz_concat(fz_scale(s, s), fz_rotate(delta_deg));
+		tb = fz_transform_rect(bounds, ctm);
+		ctm = fz_concat(ctm, fz_translate(-tb.x0, -tb.y0));
+
+		ibox = fz_irect_from_rect(fz_transform_rect(bounds, ctm));
+		pix = fz_new_pixmap_with_bbox(ctx,
+			gray ? fz_device_gray(ctx) : fz_device_rgb(ctx), ibox, NULL, 0);
+		fz_clear_pixmap_with_value(ctx, pix, 255);
+		dev = fz_new_draw_device(ctx, fz_identity, pix);
+		fz_run_page(ctx, page, dev, ctm, NULL);
+		fz_close_device(ctx, dev);
+		fz_save_pixmap_as_png(ctx, pix, out_path);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_device(ctx, dev);
+		fz_drop_pixmap(ctx, pix);
+		fz_drop_page(ctx, page);
+	}
+	fz_catch(ctx)
+	{
+		snprintf(ds_err, sizeof ds_err, "render page %d: %s",
+			number + 1, fz_caught_message(ctx));
+		return -1;
+	}
+
+	if (out_ctm)
+		*out_ctm = ctm;
+	return 0;
+}
+
+double ds_page_ink_fraction(fz_context *ctx, fz_document *doc, int number)
+{
+	fz_page *page = NULL;
+	fz_pixmap *pix = NULL;
+	fz_device *dev = NULL;
+	double frac = 1.0;
+	size_t i, n;
+
+	fz_var(page);
+	fz_var(pix);
+	fz_var(dev);
+
+	fz_try(ctx)
+	{
+		page = fz_load_page(ctx, doc, number);
+		pix = fz_new_pixmap_with_bbox(ctx, fz_device_gray(ctx),
+			fz_irect_from_rect(fz_bound_page(ctx, page)), NULL, 0);
+		fz_clear_pixmap_with_value(ctx, pix, 255);
+		dev = fz_new_draw_device(ctx, fz_identity, pix);
+		fz_run_page(ctx, page, dev, fz_identity, NULL);
+		fz_close_device(ctx, dev);
+		n = (size_t)pix->w * pix->h * pix->n;
+		{
+			unsigned char *samples = pix->samples;
+			size_t ink = 0;
+			for (i = 0; i < n; i++)
+				if (samples[i] < 200)
+					ink++;
+			frac = n ? (double)ink / (double)n : 1.0;
+		}
+	}
+	fz_always(ctx)
+	{
+		fz_drop_device(ctx, dev);
+		fz_drop_pixmap(ctx, pix);
+		fz_drop_page(ctx, page);
+	}
+	fz_catch(ctx)
+	{
+		/* unknown: assume there is something to read (python parity) */
+		return 1.0;
+	}
+	return frac;
+}
+
+/* ------------------------------------------------------------------ */
+/* Writing text ops: visible placeholders + invisible OCR text layer   */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+	float x, y;        /* display space, baseline origin */
+	float size;
+	float r, g, b;
+	int render_mode;   /* 0 visible, 3 invisible */
+	const char *text;  /* latin-1-ish; other chars become '?' */
+} ds_text_op;
+
+static void ds_escape_tj(fz_context *ctx, fz_buffer *buf, const char *text)
+{
+	for (; *text; text++)
+	{
+		unsigned char c = (unsigned char)*text;
+		if (c == '\\' || c == '(' || c == ')')
+			fz_append_byte(ctx, buf, '\\');
+		if (c >= 32 && c < 127)
+			fz_append_byte(ctx, buf, c);
+		else if (c >= 160)
+			fz_append_byte(ctx, buf, c); /* latin-1 bytes pass through */
+		else
+			fz_append_byte(ctx, buf, '?');
+	}
+}
+
+int ds_write_text_ops(fz_context *ctx, fz_document *doc_, int number,
+	const ds_text_op *ops, int n_ops)
+{
+	pdf_document *doc = (pdf_document *)doc_;
+	pdf_obj *pageobj = NULL;
+	pdf_obj *res = NULL, *fontdict = NULL, *font = NULL, *f1 = NULL;
+	pdf_obj *contents = NULL, *newstream = NULL;
+	fz_buffer *buf = NULL;
+	fz_matrix ctm, inv;
+	fz_rect crop;
+	int i;
+
+	if (n_ops <= 0)
+		return 0;
+
+	fz_var(res);
+	fz_var(fontdict);
+	fz_var(font);
+	fz_var(contents);
+	fz_var(newstream);
+	fz_var(buf);
+
+	fz_try(ctx)
+	{
+		pageobj = pdf_lookup_page_obj(ctx, doc, number);
+
+		/* display -> user space, same as the annot rect conversion */
+		{
+			pdf_page *pp = pdf_load_page(ctx, doc, number);
+			pdf_page_transform(ctx, pp, &crop, &ctm);
+			fz_drop_page(ctx, (fz_page *)pp);
+		}
+		inv = fz_invert_matrix(ctm);
+
+		res = pdf_dict_gets(ctx, pageobj, "Resources");
+		if (!res)
+		{
+			res = pdf_add_object(ctx, doc, pdf_new_dict(ctx, doc, 4));
+			pdf_dict_puts(ctx, pageobj, "Resources", res);
+		}
+		fontdict = pdf_dict_gets(ctx, res, "Font");
+		if (!fontdict)
+		{
+			fontdict = pdf_add_object(ctx, doc, pdf_new_dict(ctx, doc, 4));
+			pdf_dict_puts(ctx, res, "Font", fontdict);
+		}
+		f1 = pdf_dict_gets(ctx, fontdict, "F1");
+		if (!f1)
+		{
+			font = pdf_new_dict(ctx, doc, 4);
+			pdf_dict_puts(ctx, font, "Type", PDF_NAME(Font));
+			pdf_dict_puts(ctx, font, "Subtype", PDF_NAME(Type1));
+			pdf_dict_put_name(ctx, font, PDF_NAME(BaseFont), "Helvetica");
+			f1 = pdf_add_object(ctx, doc, font);
+			pdf_dict_puts(ctx, fontdict, "F1", f1);
+		}
+
+		buf = fz_new_buffer(ctx, 256);
+		for (i = 0; i < n_ops; i++)
+		{
+			/* display baseline point -> user space for the Tm */
+			fz_point p;
+			p.x = ops[i].x;
+			p.y = ops[i].y;
+			p = fz_transform_point(p, inv);
+			fz_append_printf(ctx, buf, "q BT %d Tr /F1 %g Tf %g %g %g rg 1 0 0 1 %g %g Tm (",
+				ops[i].render_mode, ops[i].size,
+				ops[i].r, ops[i].g, ops[i].b, p.x, p.y);
+			ds_escape_tj(ctx, buf, ops[i].text);
+			fz_append_printf(ctx, buf, ") Tj ET Q\n");
+		}
+		newstream = pdf_add_stream(ctx, doc, buf, NULL, 1);
+
+		contents = pdf_dict_gets(ctx, pageobj, "Contents");
+		if (!contents)
+			pdf_dict_puts(ctx, pageobj, "Contents", newstream);
+		else if (pdf_is_array(ctx, contents))
+			pdf_array_push(ctx, contents, newstream);
+		else
+		{
+			pdf_obj *arr = pdf_add_object(ctx, doc, pdf_new_array(ctx, doc, 4));
+			pdf_array_push(ctx, arr, contents);
+			pdf_array_push(ctx, arr, newstream);
+			pdf_dict_puts(ctx, pageobj, "Contents", arr);
+		}
+	}
+	fz_always(ctx)
+	{
+		fz_drop_buffer(ctx, buf);
+	}
+	fz_catch(ctx)
+	{
+		snprintf(ds_err, sizeof ds_err, "write text ops page %d: %s",
+			number + 1, fz_caught_message(ctx));
+		return -1;
+	}
+	return 0;
+}
+
+/* Rewrite one form widget's value by index (python widget.field_value=...). */
+int ds_set_widget_value(fz_context *ctx, fz_document *doc_, int number,
+	int idx, const char *value)
+{
+	pdf_document *doc = (pdf_document *)doc_;
+	pdf_page *page = NULL;
+	pdf_annot *w;
+	int i;
+
+	fz_var(page);
+
+	fz_try(ctx)
+	{
+		page = pdf_load_page(ctx, doc, number);
+		w = pdf_first_widget(ctx, page);
+		for (i = 0; i < idx && w; i++)
+			w = pdf_next_widget(ctx, w);
+		if (!w)
+			fz_throw(ctx, FZ_ERROR_GENERIC, "no widget %d", idx);
+		pdf_set_field_value(ctx, doc, pdf_annot_obj(ctx, w), value, 1);
+		pdf_update_annot(ctx, w);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_page(ctx, (fz_page *)page);
+	}
+	fz_catch(ctx)
+	{
+		snprintf(ds_err, sizeof ds_err, "set widget page %d idx %d: %s",
+			number + 1, idx, fz_caught_message(ctx));
+		return -1;
+	}
+	return 0;
+}

@@ -40,6 +40,18 @@ pub struct FzQuad {
     pub lr: FzPoint,
 }
 
+/// fz_matrix (a..f), used for render ctms.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct FzMatrix {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
+}
+
 /// Mirror of `struct fz_stext_char` (mupdf/fitz/structured-text.h, 1.28).
 #[repr(C)]
 pub struct FzStextChar {
@@ -75,10 +87,19 @@ pub struct FzBlockText {
     pub flags: c_int,
 }
 
+/// image block arm: { fz_matrix transform; fz_image *image; }
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct FzBlockImage {
+    pub transform: FzMatrix,
+    pub image: *mut c_void,
+}
+
 /// The block union is 32 bytes in C (matrix+image wins); keep the size honest.
 #[repr(C)]
 pub union FzStextBlockU {
     pub t: FzBlockText,
+    pub i: FzBlockImage,
     pub force_size: [u8; 32],
 }
 
@@ -111,6 +132,20 @@ pub struct DsStrList {
     pub items: *mut *mut c_char,
     pub n: c_int,
     pub cap: c_int,
+}
+
+/// ds_text_op: one BT/ET text op (visible placeholder or invisible layer).
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DsTextOp {
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub render_mode: c_int,
+    pub text: *const c_char,
 }
 
 pub const FZ_STEXT_BLOCK_TEXT: c_int = 0;
@@ -166,6 +201,32 @@ extern "C" {
     ) -> c_int;
     fn ds_outline_titles(ctx: *mut c_void, doc: *mut c_void, out: *mut DsStrList) -> c_int;
     fn ds_free_str_list(l: *mut DsStrList);
+    fn ds_render_png(
+        ctx: *mut c_void,
+        doc: *mut c_void,
+        number: c_int,
+        dpi: f64,
+        delta_deg: c_int,
+        clip_or_null: *const FzRect,
+        gray: c_int,
+        out_path: *const c_char,
+        out_ctm: *mut FzMatrix,
+    ) -> c_int;
+    fn ds_page_ink_fraction(ctx: *mut c_void, doc: *mut c_void, number: c_int) -> f64;
+    fn ds_write_text_ops(
+        ctx: *mut c_void,
+        doc: *mut c_void,
+        number: c_int,
+        ops: *const DsTextOp,
+        n_ops: c_int,
+    ) -> c_int;
+    fn ds_set_widget_value(
+        ctx: *mut c_void,
+        doc: *mut c_void,
+        number: c_int,
+        idx: c_int,
+        value: *const c_char,
+    ) -> c_int;
 }
 
 fn mupdf_msg() -> String {
@@ -233,12 +294,45 @@ impl Word {
     }
 }
 
+/// fz_storable / fz_key_storable prefix of fz_image (store.h), for w/h.
+#[repr(C)]
+pub struct FzStorable {
+    pub refs: c_int,
+    pub drop_fn: *mut c_void,
+    pub droppable: *mut c_void,
+}
+
+#[repr(C)]
+pub struct FzKeyStorable {
+    pub storable: FzStorable,
+    pub store_key_refs: u16,
+}
+
+/// fz_image head: w at offset 32, h at 36 (image.h, 1.28).
+#[repr(C)]
+pub struct FzImageHead {
+    pub key_storable: FzKeyStorable,
+    pub w: c_int,
+    pub h: c_int,
+}
+
+/// One embedded image on a page (display-space bbox + source pixel dims).
+#[derive(Clone, Copy, Debug)]
+pub struct ImageInfo {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub src_w: i32,
+    pub src_h: i32,
+}
+
 pub struct PageExtract {
     pub words: Vec<Word>,
     /// whole-page plain text (feeds the verify source-vocabulary)
     pub text: String,
-    /// embedded-image blocks on the page (milestone-1 caveat: not OCR-proven)
-    pub image_blocks: i32,
+    /// embedded-image blocks on the page
+    pub images: Vec<ImageInfo>,
 }
 
 struct DocHandle {
@@ -313,7 +407,7 @@ pub fn extract_page(path: &str, page: i32) -> Result<PageExtract> {
 
     let mut words: Vec<Word> = Vec::new();
     let mut text = String::new();
-    let mut image_blocks = 0i32;
+    let mut images: Vec<ImageInfo> = Vec::new();
 
     struct CurWord {
         x0: f32,
@@ -378,9 +472,19 @@ pub fn extract_page(path: &str, page: i32) -> Result<PageExtract> {
                         lp = line.next;
                     }
                     text.push('\n');
-                } else {
-                    if b.type_ == FZ_STEXT_BLOCK_IMAGE {
-                        image_blocks += 1;
+                } else if b.type_ == FZ_STEXT_BLOCK_IMAGE {
+                    // source dims from the fz_image head (w@32, h@36)
+                    let img = b.u.i.image;
+                    if !img.is_null() {
+                        let head = unsafe { &*(img as *const FzImageHead) };
+                        images.push(ImageInfo {
+                            x0: b.bbox.x0,
+                            y0: b.bbox.y0,
+                            x1: b.bbox.x1,
+                            y1: b.bbox.y1,
+                            src_w: head.w,
+                            src_h: head.h,
+                        });
                     }
                 }
                 block_no += 1;
@@ -388,7 +492,7 @@ pub fn extract_page(path: &str, page: i32) -> Result<PageExtract> {
             }
             ds_drop_stext_page(ctx, stext);
         }
-    Ok(PageExtract { words, text, image_blocks })
+    Ok(PageExtract { words, text, images })
 }
 /// How many pages does this PDF have? (cheap enough to open for)
 pub fn count_pages(path: &str) -> Result<i32> {
@@ -519,4 +623,110 @@ impl Drop for WriteDoc {
     fn drop(&mut self) {
         unsafe { ds_drop_document(self.ctx, self.doc) };
     }
+}
+
+/// Render one page (or a clip of it) to a PNG for OCR. Returns the
+/// display->render matrix; callers invert it to map OCR word boxes back
+/// into unrotated page space.
+pub fn render_page_png(
+    path: &str,
+    page: i32,
+    dpi: f64,
+    delta_deg: i32,
+    clip: Option<FzRect>,
+    gray: bool,
+    out_png: &str,
+) -> Result<FzMatrix> {
+    let (ctx, doc) = cached_doc(path)?;
+    let cpath = CString::new(out_png).context("NUL in path")?;
+    let mut ctm = FzMatrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+    let clip_ptr = clip
+        .as_ref()
+        .map_or(std::ptr::null(), |r| r as *const FzRect);
+    let rc = unsafe {
+        ds_render_png(ctx, doc, page, dpi, delta_deg, clip_ptr, gray as c_int, cpath.as_ptr(), &mut ctm)
+    };
+    if rc != 0 {
+        return bail("render png");
+    }
+    Ok(ctm)
+}
+
+/// How much of the page is not white (ocr.page_ink_fraction, 72 dpi gray).
+pub fn page_ink_fraction(path: &str, page: i32) -> f64 {
+    let Ok((ctx, doc)) = cached_doc(path) else { return 1.0 };
+    unsafe { ds_page_ink_fraction(ctx, doc, page) }
+}
+
+/// A text op for write_text_ops: visible placeholder or invisible layer word.
+pub struct TextOp {
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub invisible: bool,
+    pub text: String,
+}
+
+impl WriteDoc {
+    /// Append BT/ET text ops to the page's content stream (coordinates in
+    /// display space; the shim converts to user space like annot rects).
+    pub fn write_text_ops(&self, number: i32, ops: &[TextOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // keep the CStrings alive for the duration of the call
+        let c_texts: Vec<CString> = ops
+            .iter()
+            .map(|o| CString::new(latin1_lossy(&o.text)))
+            .collect::<std::result::Result<_, _>>()
+            .context("NUL in text op")?;
+        let c_ops: Vec<DsTextOp> = ops
+            .iter()
+            .zip(c_texts.iter())
+            .map(|(o, t)| DsTextOp {
+                x: o.x,
+                y: o.y,
+                size: o.size,
+                r: o.r,
+                g: o.g,
+                b: o.b,
+                render_mode: if o.invisible { 3 } else { 0 },
+                text: t.as_ptr(),
+            })
+            .collect();
+        let rc = unsafe {
+            ds_write_text_ops(self.ctx, self.doc, number, c_ops.as_ptr(), c_ops.len() as c_int)
+        };
+        if rc != 0 {
+            return bail("write text ops");
+        }
+        Ok(())
+    }
+
+    /// Rewrite one form widget's value by index.
+    pub fn set_widget_value(&self, number: i32, idx: i32, value: &str) -> Result<()> {
+        let cvalue = CString::new(value).context("NUL in field value")?;
+        let rc = unsafe { ds_set_widget_value(self.ctx, self.doc, number, idx, cvalue.as_ptr()) };
+        if rc != 0 {
+            return bail("set widget value");
+        }
+        Ok(())
+    }
+}
+
+/// The text-op writer writes latin-1 bytes; keep everything else as '?'.
+fn latin1_lossy(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let v = c as u32;
+            if v < 256 {
+                char::from_u32(v).unwrap_or('?')
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
